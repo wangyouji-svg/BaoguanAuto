@@ -1,0 +1,19 @@
+# generated artifacts
+scripts/generated/
+__tmp_unmerged_single.xlsx
+
+# python cache
+scripts/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# logs
+*.log
+scripts/backend_access.log
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

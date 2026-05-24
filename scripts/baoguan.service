@@ -1,0 +1,16 @@
+[Unit]
+Description=报关资料后端 Flask 服务
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/baoguan-backend
+ExecStart=/root/logiflow-tracker/.venv/bin/python backend_server.py
+Environment=PUBLIC_BASE_URL=https://pkcellsolution.com/baoguan
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/baoguan-backend/server.log
+StandardError=append:/root/baoguan-backend/server.log
+
+[Install]
+WantedBy=multi-user.target

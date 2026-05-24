@@ -1,0 +1,70 @@
+# 超链接
+
+<br />
+
+## 示例代码
+
+```
+const sheet = Workbook.getActiveSheet();
+const range = sheet.getRange('A1');
+
+// 为A1单元格插入一个链接，指向'alidocs.dingtalk.com'，显示为'钉钉文档'
+range.setHyperlink({ type: 'path', link: 'alidocs.dingtalk.com', text: '钉钉文档' });
+```
+
+效果如下![](https://alidocs.oss-cn-zhangjiakou.aliyuncs.com/res/1Lk3lb0kKwpMqm96/img/ab0967dc-973c-4c98-ac76-b4da5b584366.png)
+
+## 参数
+
+```
+export interface Hyperlink {
+ /**
+   * 类型，依次是普通链接、表格引用、单元格引用
+   */
+  type: 'path' | 'sheet' | 'range';
+  /**
+   * 链接值
+   */
+  link: string;
+  /**
+   * 单元格显示值
+   */
+  text?: string;
+ }
+```
+
+## 普通链接
+
+例如：http://dingtalk.com，为一个普通链接，对应的 Hyperlink 结构为：
+
+```
+{
+ type: 'path',
+  link: 'http://dingtalk.com',
+  text: 'http://dingtalk.com'
+}
+```
+
+## 表格引用
+
+type 为 sheet 的时候，link 为 sheetName
+
+```
+{
+ type: 'sheet',
+  link: 'Sheet1',
+  text: '工作表1'
+}
+```
+
+## 单元格引用
+
+type 为 range 的时候，link 为 a1Notation
+
+```
+{
+ type: 'range',
+  link: 'Sheet1!A4',
+  text: 'A4'
+}
+```
