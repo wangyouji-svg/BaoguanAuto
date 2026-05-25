@@ -339,6 +339,19 @@ def _to_decimal(value) -> Decimal:
         return Decimal('0')
 
 
+def _normalize_domestic_origin(value) -> str:
+    """境内货源地标准化：深圳/珠海 -> 特区，其它地区 -> 其他。"""
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if text.endswith('特区') or text.endswith('其他'):
+        return text
+    base = text[:-1] if text.endswith('市') else text
+    if base in {'深圳', '珠海'}:
+        return base + '特区'
+    return base + '其他'
+
+
 def _first_non_empty(row: dict, keys) -> str:
     """从多个候选键中取第一个非空值，统一返回字符串。"""
     for key in keys:
@@ -618,7 +631,7 @@ def fill_template(rows: list) -> str:
         ws.cell(row=base + 2, column=9).value  = row.get('币制', '美元')   # I: 币制
         ws.cell(row=base,     column=11).value = '中国'                    # K: 原产国
         ws.cell(row=base,     column=13).value = row.get('运抵国', '') or first.get('运抵国', '')  # M: 最终目的国（地区）
-        ws.cell(row=base,     column=16).value = row.get('货源地', '')     # P: 境内货源地
+        ws.cell(row=base,     column=16).value = _normalize_domestic_origin(row.get('货源地', ''))  # P: 境内货源地
         ws.cell(row=base,     column=19).value = '照章征税'                # S: 征税方式
 
         # 商品明细中的毛重由人工填写：清空 U 列值位。

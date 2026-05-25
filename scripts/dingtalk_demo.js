@@ -223,7 +223,7 @@
             if (hsCode === '8507600090' || hsCode === '8506500011') {
                 var netValue = firstNonEmptyField(row, FIELD_ALIASES['净重']);
                 if (isEmptyValue(netValue)) {
-                    missing.push('净重（千克）');
+                    missing.push('净重');
                 }
             }
 
