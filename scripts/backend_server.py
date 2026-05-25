@@ -577,6 +577,7 @@ def fill_template(rows: list) -> str:
         if clear_end_row >= pack_start_row:
             for r in range(pack_start_row, clear_end_row + 1):
                 _safe_set_cell(ws_pack, r, 3, None)  # C: 箱数
+                _safe_set_cell(ws_pack, r, 5, None)  # E: 数量单位（发票联动）
                 _safe_set_cell(ws_pack, r, 6, None)  # F: 毛重
                 _safe_set_cell(ws_pack, r, 7, None)  # G: 净重
                 _safe_set_cell(ws_pack, r, 8, None)  # H: 核对项1
@@ -586,6 +587,7 @@ def fill_template(rows: list) -> str:
         # 逐商品写入箱数/毛重/净重。
         for idx, row in enumerate(item_rows):
             r = pack_start_row + idx
+            invoice_row = 9 + idx
             qty_text = _first_non_empty(row, ['数量'])
             carton_text = _first_non_empty(row, ['箱数', '件数'])
             gross_text = _first_non_empty(row, ['毛重（千克）', '毛重'])
@@ -598,6 +600,7 @@ def fill_template(rows: list) -> str:
 
             if qty_text != '':
                 _safe_set_cell(ws_pack, r, 4, float(_to_decimal(qty_text)))
+                _safe_set_cell(ws_pack, r, 5, f'=发票!E{invoice_row}')
             if carton_text != '':
                 _safe_set_cell(ws_pack, r, 3, float(_to_decimal(carton_text)))
             if gross_text != '':
