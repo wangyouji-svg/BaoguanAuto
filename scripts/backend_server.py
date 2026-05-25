@@ -424,6 +424,101 @@ def _shift_merged_ranges(ws, start_row: int, delta: int):
         ws.merge_cells(new_ref)
 
 
+def _normalize_sheet_name(name: str) -> str:
+    """标准化工作表名：去除所有空白字符，兼容模板中的异常空格。"""
+    return re.sub(r'\s+', '', str(name or ''))
+
+
+def _find_sheet_by_name(wb, expected_name: str):
+    """按标准化名称查找工作表，找不到返回 None。"""
+    target = _normalize_sheet_name(expected_name)
+    for ws in wb.worksheets:
+        if _normalize_sheet_name(ws.title) == target:
+            return ws
+    return None
+
+
+def _normalize_invoice_formulas(wb, item_count: int):
+    """标准化发票明细区并按商品数动态扩行，避免模板历史公式错位导致跳号。"""
+    ws_invoice = _find_sheet_by_name(wb, '发票')
+    if ws_invoice is None:
+        return
+
+    detail_start_row = 9
+    base_capacity = 14
+    summary_row = 23
+    detail_count = max(1, int(item_count or 0))
+
+    if detail_count > base_capacity:
+        extra = detail_count - base_capacity
+        ws_invoice.insert_rows(summary_row, extra)
+        _shift_merged_ranges(ws_invoice, summary_row, extra)
+        for i in range(extra):
+            dst_row = summary_row + i
+            _copy_row_style(ws_invoice, summary_row - 1, dst_row)
+            _copy_single_row_merges(ws_invoice, summary_row - 1, dst_row)
+        summary_row += extra
+
+    last_detail_row = detail_start_row + detail_count - 1
+
+    # 清空明细区公式位，避免旧模板残留错位引用。
+    for row in range(detail_start_row, summary_row):
+        for col in range(3, 9):
+            ws_invoice.cell(row=row, column=col).value = None
+
+    for item_no in range(1, detail_count + 1):
+        row = detail_start_row + item_no - 1
+        ws_invoice.cell(row=row, column=3).value = f'=OFFSET(报关单!$D$1,ROW(报关单!D{item_no})*3+16,0)'
+        ws_invoice.cell(row=row, column=4).value = f'=OFFSET(报关单!$G$1,ROW(报关单!G{item_no})*3+18,0)'
+        ws_invoice.cell(row=row, column=5).value = f'=OFFSET(报关单!$H$1,ROW(报关单!H{item_no})*3+18,0)'
+        ws_invoice.cell(row=row, column=6).value = f'=IFERROR(H{row}/D{row},0)'
+        ws_invoice.cell(row=row, column=7).value = f'=OFFSET(报关单!$I$1,ROW(报关单!I{item_no})*3+18,0)'
+        ws_invoice.cell(row=row, column=8).value = f'=OFFSET(报关单!$I$1,ROW(报关单!I{item_no})*3+17,0)'
+
+    # 汇总行固定重写，确保扩行后范围不偏移。
+    ws_invoice.cell(row=summary_row, column=8).value = f'=SUM(H{detail_start_row}:H{last_detail_row})'
+
+
+def _normalize_contract_formulas(wb, item_count: int):
+    """标准化合同明细区并按商品数动态扩行，保证汇总公式范围连续。"""
+    ws_contract = _find_sheet_by_name(wb, '合同')
+    if ws_contract is None:
+        return
+
+    detail_start_row = 19
+    base_capacity = 18
+    summary_row = 37
+    detail_count = max(1, int(item_count or 0))
+
+    if detail_count > base_capacity:
+        extra = detail_count - base_capacity
+        ws_contract.insert_rows(summary_row, extra)
+        _shift_merged_ranges(ws_contract, summary_row, extra)
+        for i in range(extra):
+            dst_row = summary_row + i
+            _copy_row_style(ws_contract, summary_row - 1, dst_row)
+            _copy_single_row_merges(ws_contract, summary_row - 1, dst_row)
+        summary_row += extra
+
+    last_detail_row = detail_start_row + detail_count - 1
+
+    # 清空明细映射位，统一按发票明细连续映射。
+    for row in range(detail_start_row, summary_row):
+        ws_contract.cell(row=row, column=6).value = None
+        ws_contract.cell(row=row, column=7).value = None
+        ws_contract.cell(row=row, column=8).value = None
+
+    for item_no in range(1, detail_count + 1):
+        row = detail_start_row + item_no - 1
+        invoice_row = 8 + item_no
+        ws_contract.cell(row=row, column=6).value = f'=发票!F{invoice_row}'
+        ws_contract.cell(row=row, column=7).value = f'=发票!G{invoice_row}'
+        ws_contract.cell(row=row, column=8).value = f'=发票!H{invoice_row}'
+
+    # 汇总行固定重写，兼容历史模板 I 列可能存在补充值的口径。
+    ws_contract.cell(row=summary_row, column=8).value = f'=SUM(H{detail_start_row}:I{last_detail_row})'
+
+
 def fill_template(rows: list) -> str:
     """填充报关单模板，返回生成文件名。rows 为同一合同号码下的所有商品行。"""
     if not rows:
@@ -648,6 +743,10 @@ def fill_template(rows: list) -> str:
     ws['E12'] = f'=箱单!C{pack_summary_row}'  # 件数
     ws['F12'] = f'=箱单!F{pack_summary_row}'  # 毛重（千克）
     ws['G12'] = f'=箱单!G{pack_summary_row}'  # 净重（千克）
+
+    # 统一重写发票/合同明细区公式并按商品数扩行，修复模板中历史跳号。
+    _normalize_invoice_formulas(wb, len(item_rows))
+    _normalize_contract_formulas(wb, len(item_rows))
 
     filename = f'报关资料_{int(time.time())}.xlsx'
     wb.save(os.path.join(OUTPUT_DIR, filename))
