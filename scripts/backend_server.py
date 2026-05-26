@@ -519,6 +519,15 @@ def _normalize_contract_formulas(wb, item_count: int):
     ws_contract.cell(row=summary_row, column=8).value = f'=SUM(H{detail_start_row}:I{last_detail_row})'
 
 
+def _is_freight_row(row: dict) -> bool:
+    hs_code = str(row.get('商品编号', '')).strip()
+    item_name = str(row.get('商品名称', '')).strip()
+    spec_name = str(row.get('规格型号', '')).strip()
+    if hs_code:
+        return False
+    return item_name == '国际运费' or spec_name == '国际运费'
+
+
 def fill_template(rows: list) -> str:
     """填充报关单模板，返回生成文件名。rows 为同一合同号码下的所有商品行。"""
     if not rows:
@@ -528,13 +537,11 @@ def fill_template(rows: list) -> str:
         wb.save(os.path.join(OUTPUT_DIR, filename))
         return filename
 
-    # 识别运费行：无商品编号且商品名称为“国际运费”。
+    # 识别运费行：无商品编号，且商品名称或规格型号为“国际运费”。
     freight_row = None
     item_rows = []
     for row in rows:
-        hs_code = str(row.get('商品编号', '')).strip()
-        item_name = str(row.get('商品名称', '')).strip()
-        if not hs_code and item_name == '国际运费' and freight_row is None:
+        if _is_freight_row(row) and freight_row is None:
             freight_row = row
             continue
         item_rows.append(row)
