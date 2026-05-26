@@ -549,6 +549,14 @@ def fill_template(rows: list) -> str:
     template_path = _pick_template(len(item_rows) if item_rows else 1)
     wb = openpyxl.load_workbook(template_path)
     ws = wb['报关单']
+    ws_entrust = _find_sheet_by_name(wb, '委托书')
+
+    # 委托书 H16 改为动态日期公式，按生成当天自动计算。
+    if ws_entrust is not None:
+        ws_entrust['H16'] = '=TODAY()'
+
+    # 买方地址后续不填写，保持留空。
+    ws['V9'] = None
 
     first = item_rows[0] if item_rows else rows[0]
 
