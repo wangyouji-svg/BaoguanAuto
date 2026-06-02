@@ -642,8 +642,11 @@ def fill_template(rows: list) -> str:
         ws_pack.cell(row=pack_summary_row, column=7).value = f'=SUM(G{pack_start_row}:G{last_detail_row})'
 
     # === 报关单表头字段 ===
+    contract_no = str(first.get('合同号码', '')).strip()
+    if contract_no.upper().startswith('BK'):
+        ws['A4'] = '深圳市倍苛新能源有限公司'
     ws['A6']  = first.get('境外收货人', '')    # 境外收货人（D14 是公式 =A6，不覆盖）
-    ws['A10'] = first.get('合同号码', '')       # 合同协议号
+    ws['A10'] = contract_no                     # 合同协议号
     ws['E10'] = first.get('贸易国', '')         # 贸易国（地区）
     ws['G10'] = first.get('运抵国', '') or first.get('贸易国', '')  # 运抵国（地区）
     ws['I12'] = first.get('成交方式', '')       # 成交方式在 I12（I11 是标签行）
