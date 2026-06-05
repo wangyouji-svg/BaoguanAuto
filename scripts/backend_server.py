@@ -547,6 +547,29 @@ def _find_sheet_by_name(wb, expected_name: str):
     return None
 
 
+def _safe_filename_part(value, fallback='NA') -> str:
+    text = str(value or '').strip()
+    if not text:
+        text = fallback
+    text = re.sub(r'[\\/:*?"<>|\r\n\t]+', '-', text)
+    text = re.sub(r'\s+', '', text)
+    text = text.strip('-._')
+    return text or fallback
+
+
+def _build_output_filename(rows: list) -> str:
+    if not rows:
+        return f'报关资料_{int(time.time())}.xlsx'
+
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    customer_code = _first_non_empty(first, ['客户编码', '客户代码', '客户编号'])
+    shipment_no = _first_non_empty(first, ['发货单号', '送货单号', '出货单号'])
+
+    customer_part = _safe_filename_part(customer_code, 'NA')
+    shipment_part = _safe_filename_part(shipment_no, 'NA')
+    return f'{customer_part}-{shipment_part}-报关资料.xlsx'
+
+
 def _normalize_invoice_formulas(wb, item_count: int):
     """标准化发票明细区并按商品数动态扩行，避免模板历史公式错位导致跳号。"""
     ws_invoice = _find_sheet_by_name(wb, '发票')
@@ -654,7 +677,7 @@ def fill_template(rows: list) -> str:
     if not rows:
         template_path = _pick_template(1)
         wb = openpyxl.load_workbook(template_path)
-        filename = f'报关资料_{int(time.time())}.xlsx'
+        filename = _build_output_filename(rows)
         wb.save(os.path.join(OUTPUT_DIR, filename))
         return filename
 
@@ -910,7 +933,7 @@ def fill_template(rows: list) -> str:
     _normalize_invoice_formulas(wb, len(item_rows))
     _normalize_contract_formulas(wb, len(item_rows))
 
-    filename = f'报关资料_{int(time.time())}.xlsx'
+    filename = _build_output_filename(rows)
     wb.save(os.path.join(OUTPUT_DIR, filename))
     return filename
 
