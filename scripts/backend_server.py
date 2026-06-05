@@ -643,7 +643,7 @@ def _build_output_filename(rows: list) -> str:
 
     first = rows[0] if isinstance(rows[0], dict) else {}
     customer_code = _first_non_empty(first, ['客户编码', '客户代码', '客户编号'])
-    shipment_no = _first_non_empty(first, ['发货单号', '送货单号', '出货单号'])
+    shipment_no = _first_non_empty(first, ['系统号码', '发货单号', '送货单号', '出货单号'])
 
     customer_part = _safe_filename_part(customer_code, 'NA')
     shipment_part = _safe_filename_part(shipment_no, 'NA')
