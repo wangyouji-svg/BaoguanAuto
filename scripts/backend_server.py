@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import re
+import secrets
+import sqlite3
 import time
 import zipfile
 from copy import copy
@@ -35,10 +37,115 @@ app.logger.setLevel(logging.INFO)
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
+CACHE_DB_PATH = os.path.join(_script_dir, 'generated', 'request_cache.sqlite3')
+CACHE_TTL_SECONDS = 48 * 3600
+
 
 def _request_trace_id() -> str:
     trace_id = (request.args.get('trace_id') or request.headers.get('X-Trace-Id') or '').strip()
     return trace_id or '-'
+
+
+def _cache_connect():
+    conn = sqlite3.connect(CACHE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    return conn
+
+
+def _init_cache_db():
+    with _cache_connect() as conn:
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS request_cache (
+                token TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_request_cache_expires_at ON request_cache(expires_at)')
+
+
+def _cleanup_cache(conn, now=None):
+    if now is None:
+        now = int(time.time())
+    conn.execute('DELETE FROM request_cache WHERE expires_at < ?', (now,))
+
+
+def _store_cache_payload(payload: dict, trace_id: str) -> tuple[str, int]:
+    now = int(time.time())
+    expires_at = now + CACHE_TTL_SECONDS
+    payload_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+
+    with _cache_connect() as conn:
+        _cleanup_cache(conn, now)
+        for _ in range(5):
+            token = secrets.token_urlsafe(8)
+            try:
+                conn.execute(
+                    'INSERT INTO request_cache(token, trace_id, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
+                    (token, trace_id, payload_text, now, expires_at),
+                )
+                return token, expires_at
+            except sqlite3.IntegrityError:
+                continue
+    raise RuntimeError('生成缓存 token 失败')
+
+
+def _load_cache_payload(token: str):
+    now = int(time.time())
+    with _cache_connect() as conn:
+        _cleanup_cache(conn, now)
+        row = conn.execute(
+            'SELECT token, trace_id, payload, created_at, expires_at FROM request_cache WHERE token = ?',
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        if int(row['expires_at']) < now:
+            conn.execute('DELETE FROM request_cache WHERE token = ?', (token,))
+            return None
+        try:
+            return json.loads(row['payload'])
+        except Exception:
+            return None
+
+
+def _decode_rows_from_d(d: str):
+    padded = d.replace('-', '+').replace('_', '/')
+    padded += '=' * (-len(padded) % 4)
+    data_bytes = base64.b64decode(padded)
+    data = json.loads(data_bytes.decode('utf-8'))
+    return data.get('rows', [])
+
+
+def _rows_from_generate_request():
+    token = (request.args.get('t') or request.args.get('token') or '').strip()
+    if token:
+        payload = _load_cache_payload(token)
+        if payload is None:
+            raise KeyError('token_not_found')
+        return payload.get('rows', []), token
+
+    d = request.args.get('d', '').strip()
+    if not d:
+        raise ValueError('missing_d')
+    return _decode_rows_from_d(d), None
+
+
+def _is_generate_post_cache_mode(data):
+    mode = (request.args.get('mode') or request.args.get('op') or '').strip().lower()
+    cache_flag = (request.args.get('cache') or '').strip().lower()
+    if mode == 'cache' or cache_flag in ('1', 'true', 'yes'):
+        return True
+    meta = data.get('meta') if isinstance(data, dict) else None
+    if isinstance(meta, dict) and bool(meta.get('cacheOnly')):
+        return True
+    return False
 
 def _first_existing(paths):
     for p in paths:
@@ -70,6 +177,8 @@ def _pick_template(item_count: int) -> str:
 
 OUTPUT_DIR = os.path.join(_script_dir, 'generated')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+_init_cache_db()
 
 REQUIRED_ROW_FIELDS = [
     '境外收货人', '合同号码', '贸易国', '运抵国', '成交方式',
@@ -848,20 +957,18 @@ def generate():
         return _add_cors(app.response_class(status=204))
 
     if request.method == 'GET':
-        # GET ?d=<url-safe-base64-json>  →  直接下载 Excel
-        # 钉钉脚本无法做异步 HTTP，改为把数据编码进 URL，用户点击链接时服务器解码生成文件
-        d = request.args.get('d', '').strip()
         trace_id = _request_trace_id()
-        if not d:
-            app.logger.warning('ERR trace_id=%s code=BG4001 msg=missing_d', trace_id)
-            return f'BG4001 缺少参数 d（traceId={trace_id}）', 400
         try:
-            padded = d.replace('-', '+').replace('_', '/')
-            padded += '=' * (-len(padded) % 4)
-            data_bytes = base64.b64decode(padded)
-            data = json.loads(data_bytes.decode('utf-8'))
-            rows = data.get('rows', [])
+            rows, cache_token = _rows_from_generate_request()
+            if cache_token:
+                app.logger.info('CACHE trace_id=%s event=cache_hit token=%s', trace_id, cache_token)
         except Exception as exc:
+            if isinstance(exc, KeyError):
+                app.logger.warning('ERR trace_id=%s code=BG4004 msg=token_not_found detail=%s', trace_id, str(exc))
+                return f'BG4004 缓存 token 无效或已过期（traceId={trace_id}）', 404
+            if isinstance(exc, ValueError) and str(exc) == 'missing_d':
+                app.logger.warning('ERR trace_id=%s code=BG4001 msg=missing_d', trace_id)
+                return f'BG4001 缺少参数 d 或 t（traceId={trace_id}）', 400
             app.logger.warning('ERR trace_id=%s code=BG4002 msg=decode_failed detail=%s', trace_id, str(exc))
             return f'BG4002 数据解码失败（traceId={trace_id}）: {exc}', 400
         ok, msg = _validate_rows(rows)
@@ -890,11 +997,61 @@ def generate():
     contract_no = ''
     if rows and isinstance(rows[0], dict):
         contract_no = str(rows[0].get('合同号码', '')).strip()
+
+    if _is_generate_post_cache_mode(data):
+        payload = {
+            'rows': rows,
+            'meta': {
+                'traceId': trace_id,
+                'contractNo': contract_no,
+                'scriptVersion': (data.get('meta') or {}).get('scriptVersion', ''),
+            },
+        }
+        token, expires_at = _store_cache_payload(payload, trace_id)
+        url = f'{public_base}/generate?t={token}'
+        app.logger.info('CACHE trace_id=%s event=cache_store_via_generate contract_no=%s token=%s row_count=%s', trace_id, contract_no, token, len(rows))
+        return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
+
     app.logger.info('BIZ trace_id=%s event=generate_start contract_no=%s row_count=%s', trace_id, contract_no, len(rows))
     filename = fill_template(rows)
     app.logger.info('BIZ trace_id=%s event=generate_done contract_no=%s filename=%s', trace_id, contract_no, filename)
     url = f'{public_base}/download/{filename}'
     return jsonify({'url': url, 'filename': filename, 'traceId': trace_id})
+
+
+@app.route('/cache', methods=['POST', 'OPTIONS'])
+def cache_rows():
+    if request.method == 'OPTIONS':
+        return _add_cors(app.response_class(status=204))
+
+    data = request.get_json(force=True)
+    trace_id = _request_trace_id()
+    rows = data.get('rows', [])
+
+    ok, msg = _validate_rows(rows)
+    if not ok:
+        app.logger.warning('ERR trace_id=%s code=BG4003 msg=validate_failed detail=%s', trace_id, msg)
+        return jsonify({'error': msg, 'code': 'BG4003', 'traceId': trace_id}), 400
+
+    rows = _normalize_rows(rows)
+    contract_no = ''
+    if rows and isinstance(rows[0], dict):
+        contract_no = str(rows[0].get('合同号码', '')).strip()
+
+    payload = {
+        'rows': rows,
+        'meta': {
+            'traceId': trace_id,
+            'contractNo': contract_no,
+            'scriptVersion': (data.get('meta') or {}).get('scriptVersion', ''),
+        },
+    }
+
+    token, expires_at = _store_cache_payload(payload, trace_id)
+    public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
+    url = f'{public_base}/generate?t={token}'
+    app.logger.info('CACHE trace_id=%s event=cache_store contract_no=%s token=%s row_count=%s', trace_id, contract_no, token, len(rows))
+    return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
 
 
 

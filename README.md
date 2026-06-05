@@ -66,10 +66,10 @@
 1. 用户在 `报关资料` sheet 的 A2 起填写合同号码。
 2. 运行 `scripts/dingtalk_demo.js`。
 3. 脚本读取主数据表，按合同号码筛选行，构造 `{"rows": [...]}`。
-4. 脚本将 JSON 做 URL-safe base64 编码，拼接为：
-   - `https://pkcellsolution.com/baoguan/generate?d=<encoded>`
-5. 脚本将链接写入 B 列（超链接“点击下载”），状态写为“链接已生成”。
-6. 用户点击链接，后端解码 `d` 参数，填充模板并返回下载文件流。
+4. 脚本先把 rows POST 到 `https://pkcellsolution.com/baoguan/cache`；若入口网关尚未放通该路径，则自动回退到 `https://pkcellsolution.com/baoguan/generate?cache=1`，服务器写入 SQLite 临时缓存并返回短 token。
+5. 脚本将短链接写入 B 列，形如：
+   - `https://pkcellsolution.com/baoguan/generate?t=<token>`
+6. 用户点击链接，后端按 token 从 SQLite 取回 rows，填充模板并返回下载文件流。
 
 ---
 
@@ -166,7 +166,8 @@ python3 backend_server.py
 ### 6.2 后端填报规则（`backend_server.py`）
 
 1. 接口支持：`GET /generate?d=...` 与 `POST /generate`。
-2. 模板自动选择：
+2. 缓存写入与模板自动选择：
+   - 钉钉脚本优先把 rows 写入 `/cache`，若失败则回退 `POST /generate?cache=1`，后端落到 SQLite 临时缓存并返回短 token。
    - 商品明细 1 条：单商品模板
    - 商品明细 >1 条：多商品模板
 3. 报关单公司名称规则：
@@ -265,8 +266,8 @@ grep 'trace_id=<你的TraceId>' /root/baoguan-backend/backend_access.log
 
 ### Q3：如果 URL 太长怎么办？
 
-当前前后端代码层已移除固定长度阈值，不会在应用层直接报“数据过大”。
-但 URL 仍受浏览器、CDN、nginx、HTTP 请求行长度限制；超限时通常会返回 `414 Request-URI Too Large`。
+当前推荐模式是短 token + SQLite 临时缓存，不再把整包数据塞进 URL。
+如果仍走旧的 `d` 直链模式，URL 仍受浏览器、CDN、nginx、HTTP 请求行长度限制；超限时通常会返回 `414 Request-URI Too Large`。
 
 ### Q4：下载链接会过期吗？
 

@@ -18,14 +18,18 @@
  *   同一合同号码下，若某行“商品编号”为空且“商品名称”为“国际运费”，
  *   后端会把该行“单价+币别”写入报关单运费栏（K12，合并单元格主单元格）。
  *
- * 原理：脚本不发送任何网络请求，将订单数据 base64 编码嵌入 URL。
- * 用户点击超链接时，服务器解码数据并实时生成 Excel 下载。
+ * 原理：脚本先把订单数据发到服务器侧 SQLite 临时缓存，再把短 token 写入下载链接。
+ * 用户点击超链接时，服务器按 token 取回缓存数据并实时生成 Excel 下载。
  */
 
 (function () {
     var DATA_SHEET_NAME = '报关数据';
     var RESULT_SHEET_NAME = '报关资料';
-    var SCRIPT_VERSION = 'debug-v1';
+    var SCRIPT_VERSION = 'cache-v1';
+    var CACHE_ENDPOINTS = [
+        'https://pkcellsolution.com/baoguan/cache',
+        'https://pkcellsolution.com/baoguan/generate?cache=1'
+    ];
 
     var REQUIRED_COLUMNS = [
         '合同号码', '境外收货人', '贸易国', '运抵国', '成交方式',
@@ -82,6 +86,32 @@
             }
         }
         return '';
+    }
+
+    function postJsonSync(url, payload, traceId) {
+        if (typeof XMLHttpRequest === 'undefined') {
+            throw new Error('当前脚本环境不支持 XMLHttpRequest');
+        }
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', url, false);
+        xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+        xhr.setRequestHeader('X-Trace-Id', traceId);
+        xhr.send(JSON.stringify(payload));
+        var responseText = xhr.responseText || '';
+        if (xhr.status < 200 || xhr.status >= 300) {
+            throw new Error('HTTP ' + xhr.status + ': ' + responseText);
+        }
+        if (!responseText) {
+            return {};
+        }
+        return JSON.parse(responseText);
+    }
+
+    function buildLegacyUrl(dataStr, traceId) {
+        var encoded = b64EncodeUtf8(dataStr);
+        return 'https://pkcellsolution.com/baoguan/generate?d=' + encoded
+            + '&trace_id=' + encodeURIComponent(traceId)
+            + '&sv=' + encodeURIComponent(SCRIPT_VERSION);
     }
 
     var activeSheet = Workbook.getActiveSheet();
@@ -342,13 +372,41 @@
         }
         var finalRemark = remarks.join('；');
 
-        // 把数据编码进 URL，无需任何网络请求
         var dataStr = JSON.stringify({ rows: matchedRows, meta: { traceId: traceId, scriptVersion: SCRIPT_VERSION } });
-        var encoded = b64EncodeUtf8(dataStr);
-        var genUrl = 'https://pkcellsolution.com/baoguan/generate?d=' + encoded
-            + '&trace_id=' + encodeURIComponent(traceId)
-            + '&sv=' + encodeURIComponent(SCRIPT_VERSION);
-
-        writeResult(targetRowIdx, genUrl, '链接已生成', '', finalRemark, traceId);
+        try {
+            var cacheResp = null;
+            var lastCacheError = '';
+            for (var ei = 0; ei < CACHE_ENDPOINTS.length; ei++) {
+                try {
+                    cacheResp = postJsonSync(CACHE_ENDPOINTS[ei], {
+                        rows: matchedRows,
+                        meta: { traceId: traceId, scriptVersion: SCRIPT_VERSION, cacheOnly: true }
+                    }, traceId);
+                    break;
+                } catch (innerErr) {
+                    lastCacheError = String(innerErr && innerErr.message ? innerErr.message : innerErr);
+                }
+            }
+            if (!cacheResp) {
+                throw new Error(lastCacheError || '缓存接口请求失败');
+            }
+            var shortUrl = cacheResp && cacheResp.url ? String(cacheResp.url) : '';
+            if (!shortUrl) {
+                var token = cacheResp && cacheResp.token ? String(cacheResp.token) : '';
+                if (!token) {
+                    throw new Error('缓存接口未返回 token');
+                }
+                shortUrl = 'https://pkcellsolution.com/baoguan/generate?t=' + encodeURIComponent(token)
+                    + '&trace_id=' + encodeURIComponent(traceId);
+            }
+            writeResult(targetRowIdx, shortUrl, '链接已生成', '', finalRemark, traceId);
+        } catch (cacheErr) {
+            var legacyUrl = buildLegacyUrl(dataStr, traceId);
+            if (legacyUrl.length <= 18000) {
+                writeResult(targetRowIdx, legacyUrl, '链接已生成', '', finalRemark, traceId);
+            } else {
+                writeResult(targetRowIdx, '', '缓存失败', String(cacheErr && cacheErr.message ? cacheErr.message : cacheErr), finalRemark, traceId);
+            }
+        }
     }
 })();

@@ -27,7 +27,8 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 
 | 版本    | 日期       | 类型 | 说明                                                                               |
 | ------- | ---------- | ---- | ---------------------------------------------------------------------------------- |
-| pending | 2026-06-02 | fix  | 报关单A4公司名按合同前缀切换：合同号码以BK开头时写“深圳市倍苛新能源有限公司”        |
+| pending | 2026-06-05 | feat | 短 token 链路：钉钉先写入 /cache，后端用 SQLite 临时缓存取回 rows 再生成 Excel     |
+| pending | 2026-06-02 | fix  | 报关单A4公司名按合同前缀切换：合同号码以BK开头时写“深圳市倍苛新能源有限公司”       |
 | pending | 2026-05-26 | fix  | 模板细节调整：委托书H16改为`=TODAY()`动态日期，报关单V9买方地址固定留空            |
 | pending | 2026-05-26 | fix  | 运费行识别补强：商品名称或规格型号为“国际运费”时均视为运费行，不写入商品明细       |
 | pending | 2026-05-25 | fix  | 发票/合同支持超项自动扩行：明细公式连续重写，汇总公式按实际行数自动重定位          |
@@ -66,6 +67,30 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 ---
 
 ## 详细变更记录
+
+### [pending] 2026-06-05 — feat: 短 token + SQLite 临时缓存链路
+
+背景
+
+- 旧方案把完整 `rows` base64 塞进 URL，公网链路在大数据量时会触发 414，导致请求没到后端。
+- 钉钉脚本侧不适合再继续扩展 URL 长度。
+
+改动位置
+
+- `scripts/dingtalk_demo.js`
+- `scripts/backend_server.py`
+- `README.md`
+
+改动内容
+
+- 新增 `POST /cache`：钉钉脚本先把 `rows` 写入服务器 SQLite 临时缓存。
+- 新增 `GET /generate?t=<token>`：用户点击短链接后，后端按 token 取回缓存数据并生成 Excel。
+- 新增 `POST /generate?cache=1` 兼容入口：当网关未放通 `/cache` 时，脚本可回退到该入口完成临时缓存写入。
+- 旧的 `GET /generate?d=...` 继续保留，作为兼容路径。
+
+验证
+
+- 本地 PoC 已验证短 token 链接长度仅几十字符，SQLite 缓存可正常读回 rows。
 
 ### [pending] 2026-06-02 — fix: BK 合同前缀公司名映射到报关单 A4
 
