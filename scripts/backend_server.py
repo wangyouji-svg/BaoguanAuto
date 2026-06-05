@@ -784,6 +784,24 @@ def fill_template(rows: list) -> str:
     START_ROW = 20   # 1-based
     ITEM_SLOT_COUNT = 80
 
+    # 报关单明细超出模板预置容量时，自动在明细区尾部扩行并复制样式/合并区。
+    item_count = len(item_rows)
+    if item_count > ITEM_SLOT_COUNT:
+        extra_slots = item_count - ITEM_SLOT_COUNT
+        insert_at = START_ROW + ITEM_SLOT_COUNT * ROW_STRIDE
+        insert_rows = extra_slots * ROW_STRIDE
+        ws.insert_rows(insert_at, insert_rows)
+        _shift_merged_ranges(ws, insert_at, insert_rows)
+
+        template_last_base = START_ROW + (ITEM_SLOT_COUNT - 1) * ROW_STRIDE
+        for slot_idx in range(extra_slots):
+            dst_base = insert_at + slot_idx * ROW_STRIDE
+            for dr in range(ROW_STRIDE):
+                _copy_row_style(ws, template_last_base + dr, dst_base + dr)
+                _copy_single_row_merges(ws, template_last_base + dr, dst_base + dr)
+
+        ITEM_SLOT_COUNT = item_count
+
     # 第8项后的格式（字体、边框、合并区）也要与前面一致。
     _apply_item_block_template_style(ws, START_ROW, ROW_STRIDE, ITEM_SLOT_COUNT)
 
