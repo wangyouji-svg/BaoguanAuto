@@ -265,10 +265,6 @@
         return notes;
     }
 
-    function collectManualCheckNotes(rows) {
-        return collectPerRowMissingNotes(rows);
-    }
-
     // UTF-8 安全的 URL-safe base64 编码（支持中文字段值）
     function b64EncodeUtf8(str) {
         return btoa(unescape(encodeURIComponent(str)))
@@ -378,7 +374,7 @@
         if (needManualFields.length > 0) {
             remarks.push('以下字段无有效值：' + needManualFields.join('、') + '；请手动确认');
         }
-        var manualNotes = collectManualCheckNotes(matchedRows);
+        var manualNotes = collectPerRowMissingNotes(matchedRows);
         if (manualNotes.length > 0) {
             remarks.push(manualNotes.join('；'));
         }

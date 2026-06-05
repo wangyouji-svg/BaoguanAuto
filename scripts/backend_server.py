@@ -1067,6 +1067,36 @@ def _normalize_rows(rows: list):
     return normalized
 
 
+def _extract_contract_no(rows: list) -> str:
+    if rows and isinstance(rows[0], dict):
+        return str(rows[0].get('合同号码', '')).strip()
+    return ''
+
+
+def _cache_rows_response(rows: list, trace_id: str, script_version: str, event_name: str):
+    contract_no = _extract_contract_no(rows)
+    payload = {
+        'rows': rows,
+        'meta': {
+            'traceId': trace_id,
+            'contractNo': contract_no,
+            'scriptVersion': script_version,
+        },
+    }
+    token, expires_at = _store_cache_payload(payload, trace_id)
+    public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
+    url = f'{public_base}/generate?t={token}'
+    app.logger.info(
+        'CACHE trace_id=%s event=%s contract_no=%s token=%s row_count=%s',
+        trace_id,
+        event_name,
+        contract_no,
+        token,
+        len(rows),
+    )
+    return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
+
+
 
 def _add_cors(response):
     # BunnyCDN 已自动注入 Allow-Origin 和 Allow-Headers，这里只补 Allow-Methods（BunnyCDN 不加这个）
@@ -1139,9 +1169,7 @@ def generate():
             app.logger.warning('ERR trace_id=%s code=BG4003 msg=validate_failed detail=%s', trace_id, msg)
             return f'BG4003 {msg}（traceId={trace_id}）', 400
         rows = _normalize_rows(rows)
-        contract_no = ''
-        if rows and isinstance(rows[0], dict):
-            contract_no = str(rows[0].get('合同号码', '')).strip()
+        contract_no = _extract_contract_no(rows)
         app.logger.info('BIZ trace_id=%s event=generate_start contract_no=%s row_count=%s', trace_id, contract_no, len(rows))
         filename = fill_template(rows)
         app.logger.info('BIZ trace_id=%s event=generate_done contract_no=%s filename=%s', trace_id, contract_no, filename)
@@ -1157,23 +1185,15 @@ def generate():
         return jsonify({'error': msg, 'code': 'BG4003', 'traceId': trace_id}), 400
     rows = _normalize_rows(rows)
     public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
-    contract_no = ''
-    if rows and isinstance(rows[0], dict):
-        contract_no = str(rows[0].get('合同号码', '')).strip()
+    contract_no = _extract_contract_no(rows)
 
     if _is_generate_post_cache_mode(data):
-        payload = {
-            'rows': rows,
-            'meta': {
-                'traceId': trace_id,
-                'contractNo': contract_no,
-                'scriptVersion': (data.get('meta') or {}).get('scriptVersion', ''),
-            },
-        }
-        token, expires_at = _store_cache_payload(payload, trace_id)
-        url = f'{public_base}/generate?t={token}'
-        app.logger.info('CACHE trace_id=%s event=cache_store_via_generate contract_no=%s token=%s row_count=%s', trace_id, contract_no, token, len(rows))
-        return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
+        return _cache_rows_response(
+            rows,
+            trace_id,
+            (data.get('meta') or {}).get('scriptVersion', ''),
+            'cache_store_via_generate',
+        )
 
     app.logger.info('BIZ trace_id=%s event=generate_start contract_no=%s row_count=%s', trace_id, contract_no, len(rows))
     filename = fill_template(rows)
@@ -1197,24 +1217,12 @@ def cache_rows():
         return jsonify({'error': msg, 'code': 'BG4003', 'traceId': trace_id}), 400
 
     rows = _normalize_rows(rows)
-    contract_no = ''
-    if rows and isinstance(rows[0], dict):
-        contract_no = str(rows[0].get('合同号码', '')).strip()
-
-    payload = {
-        'rows': rows,
-        'meta': {
-            'traceId': trace_id,
-            'contractNo': contract_no,
-            'scriptVersion': (data.get('meta') or {}).get('scriptVersion', ''),
-        },
-    }
-
-    token, expires_at = _store_cache_payload(payload, trace_id)
-    public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
-    url = f'{public_base}/generate?t={token}'
-    app.logger.info('CACHE trace_id=%s event=cache_store contract_no=%s token=%s row_count=%s', trace_id, contract_no, token, len(rows))
-    return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
+    return _cache_rows_response(
+        rows,
+        trace_id,
+        (data.get('meta') or {}).get('scriptVersion', ''),
+        'cache_store',
+    )
 
 
 
