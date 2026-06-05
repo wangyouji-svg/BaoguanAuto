@@ -650,6 +650,17 @@ def _build_output_filename(rows: list) -> str:
     return f'{customer_part}-{shipment_part}-报关资料.xlsx'
 
 
+def _hs_cell_value(hs_code_text: str):
+    """报关单商品编号写入值：单一纯数字编码写数字，其它情况保留文本。"""
+    text = str(hs_code_text or '').strip()
+    if re.fullmatch(r'\d+', text):
+        try:
+            return int(text)
+        except Exception:
+            return text
+    return text
+
+
 def _normalize_invoice_formulas(wb, item_count: int):
     """标准化发票明细区并按商品数动态扩行，避免模板历史公式错位导致跳号。"""
     ws_invoice = _find_sheet_by_name(wb, '发票')
@@ -980,7 +991,7 @@ def fill_template(rows: list) -> str:
             total_cell_value = f'=G{base + 2}*I{base}'
 
         ws.cell(row=base,     column=1).value  = idx + 1      # A: 项号
-        ws.cell(row=base,     column=2).value  = hs_code      # B: 商品编号（HS）
+        ws.cell(row=base,     column=2).value  = _hs_cell_value(hs_code)  # B: 商品编号（HS）
         ws.cell(row=base + 1, column=2).value  = '102'        # B+1: 征免方式
         ws.cell(row=base,     column=4).value  = short_name   # D: 商品名称（短品名）
         ws.cell(row=base + 1, column=4).value  = spec_string  # D (合并行+1): 规格型号（11段）
