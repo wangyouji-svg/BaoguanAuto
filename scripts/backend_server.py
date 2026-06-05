@@ -310,54 +310,122 @@ def _parse_spec(spec: str) -> dict:
     样例：PKCELL-ER26500-9000-3.6V-T-泡沫盘装
           NI-MH-AAA1000-10.8V-B-T-内盒装
     """
-    parts = spec.split('-') if spec else []
-    result = {'model': '', 'capacity_mah': None, 'voltage_v': None}
+    parts = [str(p).strip() for p in (spec.split('-') if spec else []) if str(p).strip()]
+    result = {
+        'model': '',
+        'capacity_value': None,
+        'capacity_unit': None,  # mah / mwh
+        'capacity_mah': None,
+        'voltage_v': None,
+    }
+
+    fixed_capacity_mah = {
+        'CR2032': 210,
+        'CR3032': 580,
+    }
 
     if not parts:
         return result
 
-    # 电压：找形如 3.6V / 10.8V 的片段
+    # 电压：兼容 1.5V(USB-C) 这类后缀。
     for p in parts:
-        m = re.match(r'^(\d+\.?\d*)V$', p)
+        m = re.search(r'(\d+\.?\d*)\s*V', p, re.IGNORECASE)
         if m:
             result['voltage_v'] = float(m.group(1))
             break
 
-    # 型号（位7）：第二位优先，若不满足则尝试第三位。
-    # 判断：需同时包含字母和数字，兼容 4/3A3800 这类无牌型号。
-    def is_model(s):
-        if not s:
-            return False
-        if re.match(r'^\d+\.?\d*V$', s):
-            return False
-        return bool(re.search(r'[A-Za-z]', s) and re.search(r'\d', s))
+    upper_parts = [p.upper() for p in parts]
+    model = ''
+    capacity_from_model = None
 
-    if len(parts) >= 2:
-        if is_model(parts[1]):
-            result['model'] = parts[1]
-        elif len(parts) >= 3 and is_model(parts[2]):
-            result['model'] = parts[2]
-        else:
-            result['model'] = parts[1]
-
-    # 容量（位8）：在型号确定之后，找第三片段（相对于品牌之后）
-    # 找纯数字片段 或 字母+数字末尾 的容量值
-    model_idx = parts.index(result['model']) if result['model'] in parts else -1
-    cap_candidates = parts[model_idx + 1:] if model_idx >= 0 else parts[2:]
-    for p in cap_candidates:
-        if re.match(r'^\d+$', p):             # 纯数字，如 9000
-            result['capacity_mah'] = float(p)
-            break
-        m = re.search(r'(\d+)$', p)
-        if m and not re.match(r'^\d+\.?\d*V$', p):   # 非电压片段
-            result['capacity_mah'] = float(m.group(1))
+    # 优先识别常见扣式/锂锰型号：LIR2032 / CR2032 / CR3032
+    for up in upper_parts:
+        if re.match(r'^(LIR|CR)\d{3,4}$', up):
+            model = up
             break
 
-    # 无牌型号常见场景：容量直接包含在型号中，如 SC3000 / 4/3A3800。
-    if result['capacity_mah'] is None and result['model']:
-        m = re.search(r'(\d+)$', result['model'])
+    # 识别 AA / AAA（用于 Li-ion-AA-3600mWh、AAA950 等）
+    if not model:
+        for up in upper_parts:
+            if up in {'AA', 'AAA'}:
+                model = up
+                break
+
+    # 识别 AAA950 / AA2500，型号取 AAA/AA，容量取 950/2500mAh
+    if not model:
+        for up in upper_parts:
+            m = re.match(r'^(AAA|AA)(\d{2,5})$', up)
+            if m:
+                model = m.group(1)
+                capacity_from_model = float(m.group(2))
+                break
+
+    # 识别 B250H / B80H，容量取中间数字。
+    if not model:
+        for up in upper_parts:
+            m = re.match(r'^(B\d{2,5}H)$', up)
+            if m:
+                model = m.group(1)
+                m2 = re.search(r'(\d{2,5})', up)
+                if m2:
+                    capacity_from_model = float(m2.group(1))
+                break
+
+    # 通用兜底：取首个“含字母+数字”的片段，但排除 BAT/PLI 编码段。
+    if not model:
+        for up in upper_parts:
+            if re.search(r'(BAT|PLI)\s*\d+', up):
+                continue
+            if re.search(r'[A-Z]', up) and re.search(r'\d', up) and not re.search(r'\d+\.?\d*\s*V', up):
+                model = up
+                break
+
+    # 容量优先识别显式单位：mWh / mAh。
+    for up in upper_parts:
+        m = re.match(r'^(\d+(?:\.\d+)?)\s*(MWH|MAH)$', up)
         if m:
-            result['capacity_mah'] = float(m.group(1))
+            result['capacity_value'] = float(m.group(1))
+            result['capacity_unit'] = m.group(2).lower()
+            break
+
+    # 固定容量规则：CR2032=210mAh，CR3032=580mAh。
+    if result['capacity_value'] is None and model in fixed_capacity_mah:
+        result['capacity_value'] = float(fixed_capacity_mah[model])
+        result['capacity_unit'] = 'mah'
+
+    # 来自型号内置容量（如 AAA950 / B250H）。
+    if result['capacity_value'] is None and capacity_from_model is not None:
+        result['capacity_value'] = capacity_from_model
+        result['capacity_unit'] = 'mah'
+
+    # 若型号之后紧跟纯数字，按 mAh 处理（如 LIR2032-40-3.6V）。
+    if result['capacity_value'] is None and model:
+        model_idx = -1
+        for i, up in enumerate(upper_parts):
+            if up == model:
+                model_idx = i
+                break
+        if model_idx >= 0:
+            for up in upper_parts[model_idx + 1:]:
+                if re.search(r'\d+\.?\d*\s*V', up):
+                    continue
+                if re.search(r'(BAT|PLI)\s*\d+', up):
+                    continue
+                if re.match(r'^\d+(?:\.\d+)?$', up):
+                    result['capacity_value'] = float(up)
+                    result['capacity_unit'] = 'mah'
+                    break
+
+    # 最后兜底：型号末尾数字，默认 mAh（扣式固定容量除外）。
+    if result['capacity_value'] is None and model and model not in fixed_capacity_mah:
+        m = re.search(r'(\d{2,5})$', model)
+        if m and not re.match(r'^(CR|LIR)\d{3,4}$', model):
+            result['capacity_value'] = float(m.group(1))
+            result['capacity_unit'] = 'mah'
+
+    result['model'] = model
+    if result['capacity_unit'] == 'mah':
+        result['capacity_mah'] = result['capacity_value']
 
     return result
 
@@ -397,8 +465,17 @@ def build_product_name(row: dict, pack_qty=None, pack_net=None) -> str:
     parsed = _parse_spec(spec)
     bit7 = parsed['model']
 
-    capacity_mah = parsed['capacity_mah']
-    bit8 = f"{int(capacity_mah)}mAh" if capacity_mah is not None else ''
+    capacity_value = parsed.get('capacity_value')
+    capacity_unit = parsed.get('capacity_unit')
+    capacity_mah = parsed.get('capacity_mah')
+    if capacity_value is None:
+        bit8 = ''
+    elif float(capacity_value).is_integer():
+        unit_text = 'mWh' if capacity_unit == 'mwh' else 'mAh'
+        bit8 = f"{int(capacity_value)}{unit_text}"
+    else:
+        unit_text = 'mWh' if capacity_unit == 'mwh' else 'mAh'
+        bit8 = f"{capacity_value}{unit_text}"
 
     bit9 = '不含汞'
 
@@ -413,11 +490,14 @@ def build_product_name(row: dict, pack_qty=None, pack_net=None) -> str:
         if qty_dec > 0 and net_dec > 0 and ratio is not None:
             content_kg = ((net_dec / qty_dec) * ratio).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
             bit11 = f'单个锂亚硫酰氯电池亚硫酰氯灌装含量{content_kg}KG'
-    elif hs_code == LITHIUM_ION_HS and capacity_mah is not None and voltage_v is not None:
+    elif hs_code == LITHIUM_ION_HS and capacity_value is not None and (voltage_v is not None or capacity_unit == 'mwh'):
         qty_dec = _to_decimal(pack_qty if pack_qty is not None else row.get('数量', 0))
         net_dec = _to_decimal(pack_net if pack_net is not None else _first_non_empty(row, ['净重（千克）', '净重']))
         if qty_dec > 0 and net_dec > 0:
-            wh = (Decimal(str(capacity_mah)) * Decimal(str(voltage_v))) / Decimal('1000')
+            if capacity_unit == 'mwh':
+                wh = Decimal(str(capacity_value)) / Decimal('1000')
+            else:
+                wh = (Decimal(str(capacity_value)) * Decimal(str(voltage_v))) / Decimal('1000')
             specific_energy = (wh / (net_dec / qty_dec)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             bit11 = f'比能量：{specific_energy}WH/KG'
 
@@ -949,12 +1029,29 @@ def _validate_rows(rows: list):
 
 def _normalize_rows(rows: list):
     normalized = []
+
+    def _clean_hs_code(raw):
+        text = str(raw or '').strip()
+        if not text:
+            return ''
+        parts = [p.strip() for p in re.split(r'[、,，;；]+', text) if p and str(p).strip()]
+        cleaned = []
+        for p in parts:
+            p = re.sub(r'^[\'\"`“”‘’]+', '', p)
+            p = re.sub(r'[\'\"`“”‘’]+$', '', p)
+            p = p.strip()
+            if p:
+                cleaned.append(p)
+        return '、'.join(cleaned)
+
     for row in rows:
         if not isinstance(row, dict):
             continue
         item = dict(row)
         if not item.get('币制') and item.get('币别'):
             item['币制'] = item.get('币别')
+        if '商品编号' in item:
+            item['商品编号'] = _clean_hs_code(item.get('商品编号'))
         normalized.append(item)
     return normalized
 
