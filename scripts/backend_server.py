@@ -611,6 +611,12 @@ def _normalize_contract_formulas(wb, item_count: int):
 
     last_detail_row = detail_start_row + detail_count - 1
 
+    # 模板在34行后常出现行高/样式漂移，统一以首行明细样式覆盖整个明细区。
+    style_template_row = detail_start_row
+    for row in range(detail_start_row + 1, last_detail_row + 1):
+        _copy_row_style(ws_contract, style_template_row, row)
+        _copy_single_row_merges(ws_contract, style_template_row, row)
+
     # 清空明细映射位，统一按发票明细连续映射。
     for row in range(detail_start_row, summary_row):
         ws_contract.cell(row=row, column=2).value = None
