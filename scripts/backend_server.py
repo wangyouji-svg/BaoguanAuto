@@ -39,6 +39,7 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 
 CACHE_DB_PATH = os.path.join(_script_dir, 'generated', 'request_cache.sqlite3')
 CACHE_TTL_SECONDS = 48 * 3600
+GENERATED_EXCEL_TTL_SECONDS = 30 * 24 * 3600
 
 
 def _request_trace_id() -> str:
@@ -179,6 +180,33 @@ OUTPUT_DIR = os.path.join(_script_dir, 'generated')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 _init_cache_db()
+
+
+def _cleanup_generated_excels(now=None):
+    """清理 generated 目录中过期 Excel，默认仅保留近 30 天。"""
+    if now is None:
+        now = int(time.time())
+    cutoff = now - GENERATED_EXCEL_TTL_SECONDS
+    removed = 0
+    for entry in os.scandir(OUTPUT_DIR):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        if not (name.endswith('.xlsx') or name.endswith('.xls') or name.endswith('.xlsm')):
+            continue
+        try:
+            if int(entry.stat().st_mtime) < cutoff:
+                os.remove(entry.path)
+                removed += 1
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            app.logger.warning('CLEANUP skip file=%s err=%s', entry.path, str(exc))
+    if removed:
+        app.logger.info('CLEANUP removed_expired_excels=%s ttl_days=30', removed)
+
+
+_cleanup_generated_excels()
 
 REQUIRED_ROW_FIELDS = [
     '境外收货人', '合同号码', '贸易国', '运抵国', '成交方式',
@@ -765,6 +793,8 @@ def _is_freight_row(row: dict) -> bool:
 
 def fill_template(rows: list) -> str:
     """填充报关单模板，返回生成文件名。rows 为同一合同号码下的所有商品行。"""
+    _cleanup_generated_excels()
+
     if not rows:
         template_path = _pick_template(1)
         wb = openpyxl.load_workbook(template_path)
