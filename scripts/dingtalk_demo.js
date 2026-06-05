@@ -92,10 +92,11 @@
         if (typeof XMLHttpRequest === 'undefined') {
             throw new Error('当前脚本环境不支持 XMLHttpRequest');
         }
+        var reqUrl = url + (url.indexOf('?') >= 0 ? '&' : '?')
+            + 'trace_id=' + encodeURIComponent(traceId);
         var xhr = new XMLHttpRequest();
-        xhr.open('POST', url, false);
+        xhr.open('POST', reqUrl, false);
         xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
-        xhr.setRequestHeader('X-Trace-Id', traceId);
         xhr.send(JSON.stringify(payload));
         var responseText = xhr.responseText || '';
         if (xhr.status < 200 || xhr.status >= 300) {

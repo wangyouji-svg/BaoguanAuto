@@ -613,6 +613,9 @@ def _normalize_contract_formulas(wb, item_count: int):
 
     # 清空明细映射位，统一按发票明细连续映射。
     for row in range(detail_start_row, summary_row):
+        ws_contract.cell(row=row, column=2).value = None
+        ws_contract.cell(row=row, column=4).value = None
+        ws_contract.cell(row=row, column=5).value = None
         ws_contract.cell(row=row, column=6).value = None
         ws_contract.cell(row=row, column=7).value = None
         ws_contract.cell(row=row, column=8).value = None
@@ -620,6 +623,9 @@ def _normalize_contract_formulas(wb, item_count: int):
     for item_no in range(1, detail_count + 1):
         row = detail_start_row + item_no - 1
         invoice_row = 8 + item_no
+        ws_contract.cell(row=row, column=2).value = f'=发票!C{invoice_row}'
+        ws_contract.cell(row=row, column=4).value = f'=发票!D{invoice_row}'
+        ws_contract.cell(row=row, column=5).value = f'=发票!E{invoice_row}'
         ws_contract.cell(row=row, column=6).value = f'=发票!F{invoice_row}'
         ws_contract.cell(row=row, column=7).value = f'=发票!G{invoice_row}'
         ws_contract.cell(row=row, column=8).value = f'=发票!H{invoice_row}'
@@ -700,6 +706,7 @@ def fill_template(rows: list) -> str:
         clear_end_row = pack_summary_row - 1
         if clear_end_row >= pack_start_row:
             for r in range(pack_start_row, clear_end_row + 1):
+                _safe_set_cell(ws_pack, r, 2, None)  # B: 品名（发票联动）
                 _safe_set_cell(ws_pack, r, 3, None)  # C: 箱数
                 _safe_set_cell(ws_pack, r, 5, None)  # E: 数量单位（发票联动）
                 _safe_set_cell(ws_pack, r, 6, None)  # F: 毛重
@@ -722,6 +729,7 @@ def fill_template(rows: list) -> str:
             voltage_v = parsed_spec.get('voltage_v')
             model_code = str(parsed_spec.get('model', '')).strip().upper()
 
+            _safe_set_cell(ws_pack, r, 2, f'=发票!C{invoice_row}')
             if qty_text != '':
                 _safe_set_cell(ws_pack, r, 4, float(_to_decimal(qty_text)))
                 _safe_set_cell(ws_pack, r, 5, f'=发票!E{invoice_row}')
