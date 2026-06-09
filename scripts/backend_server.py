@@ -350,6 +350,11 @@ def _parse_spec(spec: str) -> dict:
     fixed_capacity_mah = {
         'CR2032': 210,
         'CR3032': 580,
+        'HPC1520': 90,
+    }
+
+    fixed_voltage = {
+        'HPC1520': 4.0,
     }
 
     if not parts:
@@ -397,6 +402,14 @@ def _parse_spec(spec: str) -> dict:
                 m2 = re.search(r'(\d{2,5})', up)
                 if m2:
                     capacity_from_model = float(m2.group(1))
+                break
+
+    # 识别 HPC 系列型号（如 HPC1520）
+    if not model:
+        for up in upper_parts:
+            m = re.match(r'^(HPC\d{3,5})$', up)
+            if m:
+                model = m.group(1)
                 break
 
     # 通用兜底：取首个“含字母+数字”的片段，但排除 BAT/PLI 编码段。
@@ -450,6 +463,10 @@ def _parse_spec(spec: str) -> dict:
         if m and not re.match(r'^(CR|LIR)\d{3,4}$', model):
             result['capacity_value'] = float(m.group(1))
             result['capacity_unit'] = 'mah'
+
+    # 固定电压规则（如 HPC1520=4.0V）
+    if result['voltage_v'] is None and model in fixed_voltage:
+        result['voltage_v'] = fixed_voltage[model]
 
     result['model'] = model
     if result['capacity_unit'] == 'mah':
