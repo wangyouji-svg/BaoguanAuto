@@ -18,16 +18,15 @@
  *   同一合同号码下，若某行“商品编号”为空且“商品名称”为“国际运费”，
  *   后端会把该行“单价+币别”写入报关单运费栏（K12，合并单元格主单元格）。
  *
- * 原理：脚本先把订单数据发到服务器侧 SQLite 临时缓存，再把短 token 写入下载链接。
+ * 原理：脚本把订单数据发到后端 `generate?cache=1` 写入 SQLite 临时缓存，再把短 token 写入下载链接。
  * 用户点击超链接时，服务器按 token 取回缓存数据并实时生成 Excel 下载。
  */
 
 (function () {
     var DATA_SHEET_NAME = '报关数据';
     var RESULT_SHEET_NAME = '报关资料';
-    var SCRIPT_VERSION = 'cache-v1';
+    var SCRIPT_VERSION = 'cache-v2';
     var CACHE_ENDPOINTS = [
-        'https://pkcellsolution.com/baoguan/cache',
         'https://pkcellsolution.com/baoguan/generate?cache=1'
     ];
 
@@ -399,6 +398,10 @@
                 throw new Error(lastCacheError || '缓存接口请求失败');
             }
             var shortUrl = cacheResp && cacheResp.url ? String(cacheResp.url) : '';
+            if (shortUrl && shortUrl.indexOf('trace_id=') < 0) {
+                shortUrl += (shortUrl.indexOf('?') >= 0 ? '&' : '?')
+                    + 'trace_id=' + encodeURIComponent(traceId);
+            }
             if (!shortUrl) {
                 var token = cacheResp && cacheResp.token ? String(cacheResp.token) : '';
                 if (!token) {

@@ -1,0 +1,14 @@
+.git
+generated
+scripts/generated
+scripts/__pycache__
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+__tmp_unmerged_single.xlsx
+.vscode
+.idea
+.DS_Store
+Thumbs.db

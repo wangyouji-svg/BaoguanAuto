@@ -6,6 +6,7 @@
 
 - 钉钉脚本同步上传 rows 到后端临时缓存（短 token 模式）
 - 用户点击短链接后，由后端按 token 取回 rows 并实时生成 Excel 下载
+- 同一个 token 首次下载后会复用已生成文件，重复点击不会重复生成
 
 ### 实现的核心原理
 
@@ -14,10 +15,11 @@
 更直白地说：
 
 1. 钉钉脚本先读取 `报关数据`，把当前合同号码对应的行整理成 `{"rows": [...]}`。
-2. 脚本同步调用后端缓存接口（优先 `/cache`，回退 `/generate?cache=1`）。
+2. 脚本同步调用后端缓存接口 `POST /generate?cache=1`。
 3. 后端把 rows 存入 SQLite 临时缓存，返回短 token。
 4. 脚本把 `https://pkcellsolution.com/baoguan/generate?t=<token>` 写回 `报关资料`。
 5. 用户点击链接后，后端按 token 取回 rows，现场生成 Excel 并返回下载。
+6. 若同一个 token 被再次点击，后端直接复用上一次已生成文件，不再重复填模板。
 
 这样做的好处是：
 
@@ -31,6 +33,7 @@
 
 - 前端到后端缓存写入仍是 `https` 请求，只是下载链接变为短 token 方式。
 - token 临时缓存有效期为 48 小时，超时后需要重新生成链接。
+- 同一个 token 的首次下载仍然会实时生成，后续重复点击走文件复用，因此第一次和第二次耗时差异会很明显。
 - 生成目录中的历史 Excel 默认仅保留近 30 天，避免目录持续膨胀。
 
 ---
@@ -67,10 +70,11 @@
 1. 用户在 `报关资料` sheet 的 A2 起填写合同号码。
 2. 运行 `scripts/dingtalk_demo.js`。
 3. 脚本读取主数据表，按合同号码筛选行，构造 `{"rows": [...]}`。
-4. 脚本先把 rows POST 到 `https://pkcellsolution.com/baoguan/cache`；若入口网关尚未放通该路径，则自动回退到 `https://pkcellsolution.com/baoguan/generate?cache=1`，服务器写入 SQLite 临时缓存并返回短 token。
+4. 脚本把 rows 直接 POST 到 `https://pkcellsolution.com/baoguan/generate?cache=1`，服务器写入 SQLite 临时缓存并返回短 token。
 5. 脚本将短链接写入 B 列，形如：
-   - `https://pkcellsolution.com/baoguan/generate?t=<token>`
+   - `https://pkcellsolution.com/baoguan/generate?t=<token>&trace_id=<TraceId>`
 6. 用户点击链接，后端按 token 从 SQLite 取回 rows，填充模板并返回下载文件流。
+7. 若用户重复点击同一个短链接，后端直接复用已生成文件，不再重复计算。
 
 ---
 
@@ -140,10 +144,10 @@ python3 backend_server.py
 ## 6.4 Debug 追踪体系（TraceId）
 
 1. 前端每次生成链接会创建唯一 TraceId，并写入 `报关资料` 的 C 列。
-2. TraceId 同时会附加到下载链接参数（`trace_id`），后端日志全链路记录该值。
+2. TraceId 会附加到下载链接参数（`trace_id`），后端日志全链路记录该值。
 3. 后端日志关键阶段：
    - `REQ`：请求进入
-   - `BIZ`：业务开始/完成（含合同号码、行数、文件名）
+   - `BIZ`：业务开始/完成/复用（含合同号码、行数、文件名）
    - `ERR`：可预期错误（带错误码，如 BG4001/BG4002/BG4003）
    - `UNHANDLED`：未处理异常（BG5000）
 
@@ -166,14 +170,24 @@ python3 backend_server.py
 
 ### 6.2 后端填报规则（`backend_server.py`）
 
-1. 接口支持：`GET /generate?d=...` 与 `POST /generate`。
+1. 接口支持：`GET /generate?d=...`、`GET /generate?t=...`、`POST /generate` 与 `POST /cache`。
 2. 缓存写入与模板自动选择：
-   - 钉钉脚本优先把 rows 写入 `/cache`，若失败则回退 `POST /generate?cache=1`，后端落到 SQLite 临时缓存并返回短 token。
+   - 钉钉脚本直接写入 `POST /generate?cache=1`，后端落到 SQLite 临时缓存并返回短 token。
+   - 短 token 下载链路具备幂等复用能力：同 token 首次生成后，后续重复下载直接返回已生成文件。
    - 商品明细 1 条：单商品模板
    - 商品明细 >1 条：多商品模板
 3. 报关单公司名称规则：
-   - 当合同号码前缀为 `BK`（不区分大小写）时，写入 `报关单!A4=深圳市倍苛新能源有限公司`。
-   - 非 `BK` 前缀合同保持模板原有 `A4` 文案。
+   - 当合同号码前缀为 `BK`（不区分大小写）时，写入：
+     `报关单!A4=深圳市倍苛新能源有限公司`
+     `报关单!C3=91440300MA5DETYT75`
+     `报关单!V6=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+     `合同!C5=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+   - 当合同号码前缀为 `TC`（不区分大小写）时，写入：
+     `报关单!A4=深圳市特创盈能源有限公司`
+     `报关单!C3=91440300MAEB8FWL2Q`
+     `报关单!V6=深圳市龙华区民治街道红山社区南源新村南源商业大厦B座1108A`
+     `合同!C5=深圳市龙华区民治街道红山社区南源新村南源商业大厦B座1108A`
+   - 其他前缀合同保持模板原有默认值。
 4. 运费规则：
    - 同合同号码下，若某行 `商品编号` 为空且 `商品名称` 为 `国际运费`，
    - 将该行 `单价 + 币制/币别` 写入 `K12`（合并单元格主单元格）。
@@ -233,6 +247,14 @@ tail -n 100 /root/baoguan-backend/backend_access.log
 
 日志会记录：TraceId、方法、路径、状态码、耗时、`d` 参数长度、业务阶段、错误码、异常信息。
 
+与下载幂等相关的关键日志：
+
+- `CACHE ... event=cache_hit token=...`：命中 token 缓存
+- `BIZ ... event=generate_start`：首次开始生成
+- `BIZ ... event=generate_done`：首次生成完成
+- `BIZ ... event=generate_reuse`：重复点击直接复用已生成文件
+- `BIZ ... event=generate_reuse_after_wait`：并发点击时等待首个请求生成完成后复用
+
 按 TraceId 检索：
 
 ```bash
@@ -246,10 +268,17 @@ grep 'trace_id=<你的TraceId>' /root/baoguan-backend/backend_access.log
 2. 直连 Flask：`http://127.0.0.1:5000/generate?d=...` 是否 200
 3. CDN 路径：`https://pkcellsolution.com/baoguan/generate?d=...` 是否 200
 4. 结果表 F 列是否有“写入超链接失败（长度=...）”
+5. 若脚本报 `Failed to execute 'send' on 'XMLHttpRequest'`，同时后端 `backend_access.log` 没有对应 TraceId，继续查 nginx 源站日志：
+   - `/www/wwwlogs/101.96.212.128.log`
+   - `/www/wwwlogs/101.96.212.128.error.log`
+6. CDN 回源 Host 可能是 `101.96.212.128`，所以 IP 站点和 `baoguan.pkcellsolution.com` 站点都需要有 `/generate`、`/cache`、`/download/` 代理规则。
 
 ### 7.3 已验证事实
 
 - 同一个下载链接可连续访问多次，后端会继续返回 200。
+- 同一个 token：
+  - 第一次点击通常耗时约 1 秒级到数秒级，取决于模板填充与磁盘写入
+  - 后续重复点击若命中复用，通常只需毫秒级
 - `generated/` 目录可持续新增文件。
 - “运行一次后全都不能下载”通常不是后端进程挂掉，更常见是链接写入/客户端打开链路问题。
 

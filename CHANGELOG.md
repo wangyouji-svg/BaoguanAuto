@@ -27,6 +27,12 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 
 | 版本    | 日期       | 类型     | 说明                                                                                   |
 | ------- | ---------- | -------- | -------------------------------------------------------------------------------------- |
+| pending | 2026-07-21 | fix      | BK 税号补齐：倍苛新能源抬头下报关单税号改为 `91440300MA5DETYT75`，不再沿用模板旧值     |
+| pending | 2026-07-20 | fix      | BK 合同地址更新：公司名为“深圳市倍苛新能源有限公司”时，报关单/合同地址改为南科创元谷新地址 |
+| pending | 2026-07-16 | fix      | 修复 BunnyCDN 回源 Host 为 IP 时 `/generate?cache=1` 落到静态站点导致 OPTIONS 405      |
+| pending | 2026-06-24 | fix      | 前端短链接提速：脚本只保留稳定的 `generate?cache=1`，移除失效 `/cache` 首次重试开销    |
+| pending | 2026-06-24 | fix      | TC 合同前缀映射新增：报关单公司/税号/地址与合同地址按特创盈口径覆盖                    |
+| pending | 2026-06-17 | feat     | 下载链路幂等化：同 token 首次实时生成，后续重复点击直接复用文件，并补齐 trace_id       |
 | pending | 2026-06-10 | fix      | HPC 系列规则改口径：`HPC1520` 归一识别为 `HPC152`，固定容量=90mAh，固定电压=4.0V       |
 | pending | 2026-06-05 | feat     | generated 目录生命周期治理：生成文件默认仅保留近30天（启动时+每次生成前自动清理）      |
 | pending | 2026-06-05 | refactor | 前后端链路去重：删除前端重复包装函数，合并后端缓存写入响应公共逻辑                     |
@@ -73,6 +79,243 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 ---
 
 ## 详细变更记录
+
+### [pending] 2026-07-21 — fix: BK 抬头补齐新税号覆盖
+
+背景
+
+- 用户反馈 TraceId `BG-20260720163445-717001-9Y8NZ0` 生成的报关资料中：
+  - 公司名已是 `深圳市倍苛新能源有限公司`
+  - 但税号仍为模板旧值 `9144030078527617XT`
+- 正确业务口径应为 `91440300MA5DETYT75`。
+
+根因
+
+- 服务器模板 `报关资料模板.xlsx` 中 `报关单!C3` 默认值就是旧税号 `9144030078527617XT`。
+- 现有 `BK` 合同前缀覆盖逻辑只写了：
+  - `报关单!A4`
+  - `报关单!V6`
+  - `合同!C5`
+- 没有覆盖 `报关单!C3`，因此生成时继续沿用了模板默认税号。
+
+改动位置
+
+- `scripts/backend_server.py`
+- `README.md`
+- `模板填写规则`
+
+改动内容
+
+- 新增 `BK_SELLER_TAX_NO = 91440300MA5DETYT75`。
+- `BK` 合同前缀覆盖规则补充：
+  - `报关单!C3=91440300MA5DETYT75`
+- README 与模板规则文档同步补齐 BK 税号说明。
+
+验证
+
+- 模板现状核对：`报关单!C3` 默认值确认为旧税号 `9144030078527617XT`。
+- 修复后回归生成 `BK` 合同样例，确认：
+  - `报关单!A4=深圳市倍苛新能源有限公司`
+  - `报关单!C3=91440300MA5DETYT75`
+  - `报关单!V6=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+  - `合同!C5=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+
+### [pending] 2026-07-20 — fix: BK 抬头地址切换到南科创元谷
+
+背景
+
+- 业务口径更新：当生成资料中的公司名称为 `深圳市倍苛新能源有限公司` 时，不再使用旧地址。
+- 新地址需统一改为 `深圳市龙华区大浪街道陶元社区南科创元谷3栋401`，避免报关单与合同仍带出历史地址。
+
+改动位置
+
+- `scripts/backend_server.py`
+- `模板填写规则`
+
+改动内容
+
+- 新增 `BK_ADDRESS` 常量，统一维护倍苛新能源最新地址。
+- `BK` 合同前缀覆盖规则从“只改报关单 A4 公司名”扩展为：
+  - `报关单!A4=深圳市倍苛新能源有限公司`
+  - `报关单!V6=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+  - `合同!C5=深圳市龙华区大浪街道陶元社区南科创元谷3栋401`
+- 模板规则文档同步更新 BK 地址口径。
+
+验证
+
+- 本地生成 `BK` 合同样例，确认 `报关单!A4/V6` 与 `合同!C5` 均为最新地址。
+- 服务器部署后重启 `baoguan` 服务，并回归生成链路正常。
+
+### [pending] 2026-07-16 — fix: CDN 回源 Host 为 IP 时补齐报关代理路由
+
+背景
+
+- 用户反馈 TraceId `BG-20260716112615-715002-NYKM7U` 报错：
+  - `Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'https://pkcellsolution.com/baoguan/generate?cache=1&trace_id=...'`
+- 同时对比 `BG-20260716135628-713006-LX9QSR`、`BG-20260716135629-713005-XA48E6`、`BG-20260716135629-714002-UCOYB1`。
+- 后端 `backend_access.log` 中这些 TraceId 均无业务记录，说明请求未进入 Flask。
+- nginx 访问日志显示这些请求落到了 `101.96.212.128` 静态站点：
+  - `OPTIONS /generate?cache=1&trace_id=...` 返回 `405`
+  - `POST /generate?cache=1&trace_id=...` 返回 `404`
+- nginx 错误日志显示：
+  - `open() "/www/wwwroot/mcp-ip/generate" failed`
+
+根因
+
+- BunnyCDN 回源时 `Host` 可能为 `101.96.212.128`。
+- `/generate`、`/cache`、`/download/` 代理规则只存在于 `baoguan.pkcellsolution.com` 的 server 块。
+- 当请求落到 `server_name 101.96.212.128` 时，nginx 按静态站点处理 `/generate`，预检请求被静态站点返回 `405`，浏览器侧同步 XHR 因此报 `Failed to load`。
+
+改动位置
+
+- 服务器 nginx 配置：
+  - `/www/server/panel/vhost/nginx/101.96.212.128.conf`
+
+改动内容
+
+- 在 `server_name 101.96.212.128` 的 server 块中补齐报关后端代理：
+  - `location /generate` -> `http://127.0.0.1:5000/generate`
+  - `location /cache` -> `http://127.0.0.1:5000/cache`
+  - `location /download/` -> `http://127.0.0.1:5000/download/`
+- 执行 `nginx -t` 通过后 reload。
+
+验证
+
+- `OPTIONS https://pkcellsolution.com/baoguan/generate?cache=1&trace_id=BG-PROBE-20260716`
+  - 修复前：`405`
+  - 修复后：`204`
+- `POST https://pkcellsolution.com/baoguan/generate?cache=1&trace_id=BG-PROBE-20260716`
+  - 修复后：`200`
+  - 返回 token：`PsH-Wi1hd2k`
+- 后端日志出现：
+  - `REQ trace_id=BG-PROBE-20260716 method=OPTIONS path=/generate status=204`
+  - `CACHE trace_id=BG-PROBE-20260716 event=cache_store_via_generate ...`
+  - `RES trace_id=BG-PROBE-20260716 method=POST path=/generate status=200 took_ms=3`
+
+结论
+
+- `715002` 不是数据行特殊错误，而是请求在 CDN 回源到 IP 站点时被 nginx 静态站点拦在 Flask 之前。
+- 同批 `713006/713005/714002` 的新 TraceId 也只在 nginx 日志中出现 `OPTIONS 405`，本质上同属这次公网回源路由问题。
+
+### [pending] 2026-06-24 — fix: 前端短链接只走稳定缓存入口，消除每单失败重试等待
+
+背景
+
+- 用户反馈：前端批量生成下载链接从原先 10 秒内，变成约 1 分钟。
+- 线上日志排查确认：后端 `POST /generate?cache=1` 本身仅需约 `4~6ms`，并非服务端生成短链接变慢。
+- 当前脚本仍优先请求公网 `/baoguan/cache`，但该入口现状为 `404`，导致每单都先等待一次失败后再回退到稳定入口。
+
+改动位置
+
+- `scripts/dingtalk_demo.js`
+- `CHANGELOG.md`
+
+改动内容
+
+- 删除前端脚本中的失效入口 `https://pkcellsolution.com/baoguan/cache`。
+- 仅保留已验证稳定的公网缓存入口：
+  - `https://pkcellsolution.com/baoguan/generate?cache=1`
+- 脚本版本号从 `cache-v1` 升级为 `cache-v2`，便于后续排查区分新旧脚本。
+
+验证
+
+- 线上日志证据：
+  - 浏览器批量生成时，`POST /generate?cache=1` 常见耗时 `4~6ms`
+  - 同时公网 `/baoguan/cache` `OPTIONS/POST` 返回 `404`
+- 公网探测：
+  - `/baoguan/cache`：不可用
+  - `/baoguan/generate?cache=1`：可正常接收缓存写入请求
+
+结论
+
+- 现在每单不再先撞一次失效 `/cache` 再回退，批量生成链接时间应明显回落。
+
+### [pending] 2026-06-17 — feat: 下载链路幂等化，重复点击直接复用已生成文件
+
+背景
+
+- 线上任务 `BG-20260617100859-615004-7LVAJP` 排查确认：
+  - 钉钉脚本写缓存和生成短链接本身只需数毫秒
+  - 真正耗时发生在用户点击短链接后的 `GET /generate?t=...`
+  - 同一个 token 被重复点击时，后端会重复执行模板填充，单次约 `1.3~1.5s`
+- 这会让用户体感等待时间被放大，也会让服务器重复生成同一份 Excel。
+
+改动位置
+
+- `scripts/backend_server.py`
+- `scripts/dingtalk_demo.js`
+- `scripts/test_regression.py`
+
+改动内容
+
+- 后端新增 `generated_files` 记录表：
+  - 首次 `GET /generate?t=...` 正常实时生成
+  - 生成完成后记录 `token -> filename`
+  - 同 token 再次下载时直接返回已生成文件，不再重复执行 `fill_template()`
+- 后端新增 token 级单飞锁：
+  - 若同一个 token 在首次生成尚未完成时又收到第二个请求，后续请求等待前一个生成结果
+  - 避免并发点击把一次下载放大成多次 Excel 生成
+- 短链接统一补齐 `trace_id`：
+  - `/cache` 返回的 `url` 直接带上 `trace_id`
+  - 前端对历史响应做兜底，若 `url` 中未带 `trace_id` 会自动补上
+- 访问日志新增复用阶段：
+  - `event=generate_reuse`
+  - `event=generate_reuse_after_wait`
+
+验证
+
+- 本地回归：
+  - `python -m py_compile scripts/backend_server.py scripts/test_regression.py`
+  - `.\.venv\Scripts\python.exe .\报关资料\scripts\test_regression.py`
+- 线上部署验证（2026-06-17）：
+  - `systemctl restart baoguan` 后服务状态 `active`
+  - 烟测 TraceId：`BG-SMOKE-20260617`
+  - 烟测 token：`Bzd2iZZ4XT8`
+  - 第一次下载：`200 1.384648`
+  - 第二次同 token 下载：`200 0.003886`
+  - 访问日志出现：
+    - `event=generate_start`
+    - `event=generate_done`
+    - `event=generate_reuse`
+
+结论
+
+- 本次优化不改变“首次点击实时生成”的业务模式，只消除同 token 的重复重算。
+- 用户重复点击或客户端重复请求不再显著放大等待时间。
+
+### [pending] 2026-06-24 — fix: TC 合同前缀映射到特创盈抬头/税号/地址
+
+背景
+
+- 新业务要求：当合同协议号以 `TC` 开头时，报关资料需切换到“深圳市特创盈能源有限公司”口径。
+- 模板默认值当前仍是“深圳市比苛电池有限公司”及旧地址，若不覆盖会导致报关单和合同抬头信息错误。
+
+改动位置
+
+- `scripts/backend_server.py`
+- `README.md`
+- `模板填写规则`
+
+改动内容
+
+- 新增合同前缀覆盖函数，统一在模板填充阶段处理前缀映射。
+- 当合同号码前缀为 `TC`（不区分大小写）时，写入：
+  - `报关单!A4=深圳市特创盈能源有限公司`
+  - `报关单!C3=91440300MAEB8FWL2Q`
+  - `报关单!V6=深圳市龙华区民治街道红山社区南源新村南源商业大厦B座1108A`
+  - `合同!C5=深圳市龙华区民治街道红山社区南源新村南源商业大厦B座1108A`
+- 保留既有 `BK` 前缀规则，不影响其它合同号码。
+
+验证
+
+- 本地语法检查：`python -m py_compile scripts/backend_server.py`
+- 本地样例生成校验：
+  - `TC` 合同：上述 4 个单元格按新口径覆盖
+  - `BK` 合同：`报关单!A4` 仍为“深圳市倍苛新能源有限公司”
+
+结论
+
+- 现在 `TC` 合同生成出的报关单与合同地址会自动切换到特创盈口径，无需再手工改模板。
 
 ### [pending] 2026-06-10 — fix: HPC152 型号归一与固定参数
 

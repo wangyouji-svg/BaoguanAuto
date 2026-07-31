@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import zipfile
 from copy import copy
@@ -40,6 +41,8 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 CACHE_DB_PATH = os.path.join(_script_dir, 'generated', 'request_cache.sqlite3')
 CACHE_TTL_SECONDS = 48 * 3600
 GENERATED_EXCEL_TTL_SECONDS = 30 * 24 * 3600
+_TOKEN_LOCKS: dict[str, threading.Lock] = {}
+_TOKEN_LOCKS_GUARD = threading.Lock()
 
 
 def _request_trace_id() -> str:
@@ -69,6 +72,17 @@ def _init_cache_db():
             '''
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_request_cache_expires_at ON request_cache(expires_at)')
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS generated_files (
+                token TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_access_at INTEGER NOT NULL
+            )
+            '''
+        )
 
 
 def _cleanup_cache(conn, now=None):
@@ -116,6 +130,32 @@ def _load_cache_payload(token: str):
             return None
 
 
+def _load_cache_record(token: str):
+    now = int(time.time())
+    with _cache_connect() as conn:
+        _cleanup_cache(conn, now)
+        row = conn.execute(
+            'SELECT token, trace_id, payload, created_at, expires_at FROM request_cache WHERE token = ?',
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        if int(row['expires_at']) < now:
+            conn.execute('DELETE FROM request_cache WHERE token = ?', (token,))
+            return None
+        try:
+            payload = json.loads(row['payload'])
+        except Exception:
+            return None
+        return {
+            'token': row['token'],
+            'trace_id': row['trace_id'],
+            'payload': payload,
+            'created_at': int(row['created_at']),
+            'expires_at': int(row['expires_at']),
+        }
+
+
 def _decode_rows_from_d(d: str):
     padded = d.replace('-', '+').replace('_', '/')
     padded += '=' * (-len(padded) % 4)
@@ -127,15 +167,16 @@ def _decode_rows_from_d(d: str):
 def _rows_from_generate_request():
     token = (request.args.get('t') or request.args.get('token') or '').strip()
     if token:
-        payload = _load_cache_payload(token)
-        if payload is None:
+        record = _load_cache_record(token)
+        if record is None:
             raise KeyError('token_not_found')
-        return payload.get('rows', []), token
+        payload = record.get('payload') or {}
+        return payload.get('rows', []), token, record.get('trace_id', '')
 
     d = request.args.get('d', '').strip()
     if not d:
         raise ValueError('missing_d')
-    return _decode_rows_from_d(d), None
+    return _decode_rows_from_d(d), None, ''
 
 
 def _is_generate_post_cache_mode(data):
@@ -176,6 +217,15 @@ def _pick_template(item_count: int) -> str:
         raise FileNotFoundError('未找到报关资料模板文件')
     return template
 
+
+def _get_token_lock(token: str) -> threading.Lock:
+    with _TOKEN_LOCKS_GUARD:
+        lock = _TOKEN_LOCKS.get(token)
+        if lock is None:
+            lock = threading.Lock()
+            _TOKEN_LOCKS[token] = lock
+        return lock
+
 OUTPUT_DIR = os.path.join(_script_dir, 'generated')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -204,6 +254,60 @@ def _cleanup_generated_excels(now=None):
             app.logger.warning('CLEANUP skip file=%s err=%s', entry.path, str(exc))
     if removed:
         app.logger.info('CLEANUP removed_expired_excels=%s ttl_days=30', removed)
+
+    with _cache_connect() as conn:
+        conn.execute(
+            'DELETE FROM generated_files WHERE last_access_at < ?',
+            (cutoff,),
+        )
+
+
+def _generated_file_path(filename: str) -> str:
+    return os.path.join(OUTPUT_DIR, filename)
+
+
+def _load_generated_file(token: str):
+    with _cache_connect() as conn:
+        row = conn.execute(
+            'SELECT token, trace_id, filename, created_at, last_access_at FROM generated_files WHERE token = ?',
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        filename = row['filename']
+        path = _generated_file_path(filename)
+        if not os.path.exists(path):
+            conn.execute('DELETE FROM generated_files WHERE token = ?', (token,))
+            return None
+        now = int(time.time())
+        conn.execute(
+            'UPDATE generated_files SET last_access_at = ? WHERE token = ?',
+            (now, token),
+        )
+        return {
+            'token': row['token'],
+            'trace_id': row['trace_id'],
+            'filename': filename,
+            'path': path,
+            'created_at': int(row['created_at']),
+            'last_access_at': now,
+        }
+
+
+def _store_generated_file(token: str, trace_id: str, filename: str):
+    now = int(time.time())
+    with _cache_connect() as conn:
+        conn.execute(
+            '''
+            INSERT INTO generated_files(token, trace_id, filename, created_at, last_access_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                trace_id=excluded.trace_id,
+                filename=excluded.filename,
+                last_access_at=excluded.last_access_at
+            ''',
+            (token, trace_id, filename, now, now),
+        )
 
 
 _cleanup_generated_excels()
@@ -304,6 +408,13 @@ LITHIUM_THIONYL_CHLORIDE_RATIO = {
     'ER14505H': Decimal('0.0343'),
     'ER261020': Decimal('0.3963'),
 }
+
+TC_SELLER_COMPANY = '深圳市特创盈能源有限公司'
+TC_SELLER_TAX_NO = '91440300MAEB8FWL2Q'
+TC_ADDRESS = '深圳市龙华区民治街道红山社区南源新村南源商业大厦B座1108A'
+BK_SELLER_COMPANY = '深圳市倍苛新能源有限公司'
+BK_SELLER_TAX_NO = '91440300MA5DETYT75'
+BK_ADDRESS = '深圳市龙华区大浪街道陶元社区南科创元谷3栋401'
 
 # HS编码 → 商品名称（短品名，填入 D 列第 0 行）
 HS_PRODUCT_NAME = {
@@ -811,6 +922,29 @@ def _is_freight_row(row: dict) -> bool:
     return item_name == '国际运费' or spec_name == '国际运费'
 
 
+def _apply_contract_prefix_overrides(wb, contract_no: str):
+    contract_no_upper = str(contract_no or '').strip().upper()
+    ws_declaration = _find_sheet_by_name(wb, '报关单')
+    ws_contract = _find_sheet_by_name(wb, '合同')
+
+    if ws_declaration is None:
+        return
+
+    if contract_no_upper.startswith('BK'):
+        ws_declaration['A4'] = BK_SELLER_COMPANY
+        ws_declaration['C3'] = BK_SELLER_TAX_NO
+        ws_declaration['V6'] = BK_ADDRESS
+        if ws_contract is not None:
+            ws_contract['C5'] = BK_ADDRESS
+
+    if contract_no_upper.startswith('TC'):
+        ws_declaration['A4'] = TC_SELLER_COMPANY
+        ws_declaration['C3'] = TC_SELLER_TAX_NO
+        ws_declaration['V6'] = TC_ADDRESS
+        if ws_contract is not None:
+            ws_contract['C5'] = TC_ADDRESS
+
+
 def fill_template(rows: list) -> str:
     """填充报关单模板，返回生成文件名。rows 为同一合同号码下的所有商品行。"""
     _cleanup_generated_excels()
@@ -930,8 +1064,7 @@ def fill_template(rows: list) -> str:
 
     # === 报关单表头字段 ===
     contract_no = str(first.get('合同号码', '')).strip()
-    if contract_no.upper().startswith('BK'):
-        ws['A4'] = '深圳市倍苛新能源有限公司'
+    _apply_contract_prefix_overrides(wb, contract_no)
     ws['A6']  = first.get('境外收货人', '')    # 境外收货人（D14 是公式 =A6，不覆盖）
     ws['A10'] = contract_no                     # 合同协议号
     ws['E10'] = first.get('贸易国', '')         # 贸易国（地区）
@@ -1135,7 +1268,7 @@ def _cache_rows_response(rows: list, trace_id: str, script_version: str, event_n
     }
     token, expires_at = _store_cache_payload(payload, trace_id)
     public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
-    url = f'{public_base}/generate?t={token}'
+    url = f'{public_base}/generate?t={token}&trace_id={trace_id}'
     app.logger.info(
         'CACHE trace_id=%s event=%s contract_no=%s token=%s row_count=%s',
         trace_id,
@@ -1202,9 +1335,7 @@ def generate():
     if request.method == 'GET':
         trace_id = _request_trace_id()
         try:
-            rows, cache_token = _rows_from_generate_request()
-            if cache_token:
-                app.logger.info('CACHE trace_id=%s event=cache_hit token=%s', trace_id, cache_token)
+            rows, cache_token, cache_trace_id = _rows_from_generate_request()
         except Exception as exc:
             if isinstance(exc, KeyError):
                 app.logger.warning('ERR trace_id=%s code=BG4004 msg=token_not_found detail=%s', trace_id, str(exc))
@@ -1214,12 +1345,53 @@ def generate():
                 return f'BG4001 缺少参数 d 或 t（traceId={trace_id}）', 400
             app.logger.warning('ERR trace_id=%s code=BG4002 msg=decode_failed detail=%s', trace_id, str(exc))
             return f'BG4002 数据解码失败（traceId={trace_id}）: {exc}', 400
+        if trace_id == '-' and cache_trace_id:
+            trace_id = cache_trace_id
+        if cache_token:
+            app.logger.info('CACHE trace_id=%s event=cache_hit token=%s', trace_id, cache_token)
         ok, msg = _validate_rows(rows)
         if not ok:
             app.logger.warning('ERR trace_id=%s code=BG4003 msg=validate_failed detail=%s', trace_id, msg)
             return f'BG4003 {msg}（traceId={trace_id}）', 400
         rows = _normalize_rows(rows)
         contract_no = _extract_contract_no(rows)
+        if cache_token:
+            cached = _load_generated_file(cache_token)
+            if cached:
+                app.logger.info(
+                    'BIZ trace_id=%s event=generate_reuse contract_no=%s token=%s filename=%s',
+                    trace_id,
+                    contract_no,
+                    cache_token,
+                    cached['filename'],
+                )
+                return send_from_directory(OUTPUT_DIR, cached['filename'], as_attachment=True)
+
+            token_lock = _get_token_lock(cache_token)
+            with token_lock:
+                cached = _load_generated_file(cache_token)
+                if cached:
+                    app.logger.info(
+                        'BIZ trace_id=%s event=generate_reuse_after_wait contract_no=%s token=%s filename=%s',
+                        trace_id,
+                        contract_no,
+                        cache_token,
+                        cached['filename'],
+                    )
+                    return send_from_directory(OUTPUT_DIR, cached['filename'], as_attachment=True)
+
+                app.logger.info('BIZ trace_id=%s event=generate_start contract_no=%s row_count=%s', trace_id, contract_no, len(rows))
+                filename = fill_template(rows)
+                _store_generated_file(cache_token, trace_id, filename)
+                app.logger.info(
+                    'BIZ trace_id=%s event=generate_done contract_no=%s token=%s filename=%s',
+                    trace_id,
+                    contract_no,
+                    cache_token,
+                    filename,
+                )
+                return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
         app.logger.info('BIZ trace_id=%s event=generate_start contract_no=%s row_count=%s', trace_id, contract_no, len(rows))
         filename = fill_template(rows)
         app.logger.info('BIZ trace_id=%s event=generate_done contract_no=%s filename=%s', trace_id, contract_no, filename)
