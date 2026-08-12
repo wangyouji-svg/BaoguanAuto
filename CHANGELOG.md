@@ -27,6 +27,7 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 
 | 版本    | 日期       | 类型     | 说明                                                                                   |
 | ------- | ---------- | -------- | -------------------------------------------------------------------------------------- |
+| pending | 2026-08-12 | fix      | 规格型号解析补充 `CR2477` 固定容量规则：位8固定为 `1000mAh`                            |
 | pending | 2026-07-21 | fix      | BK 税号补齐：倍苛新能源抬头下报关单税号改为 `91440300MA5DETYT75`，不再沿用模板旧值     |
 | pending | 2026-07-20 | fix      | BK 合同地址更新：公司名为“深圳市倍苛新能源有限公司”时，报关单/合同地址改为南科创元谷新地址 |
 | pending | 2026-07-16 | fix      | 修复 BunnyCDN 回源 Host 为 IP 时 `/generate?cache=1` 落到静态站点导致 OPTIONS 405      |
@@ -79,6 +80,38 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 ---
 
 ## 详细变更记录
+
+### [pending] 2026-08-12 — fix: CR2477 固定容量补充为 1000mAh
+
+背景
+
+- 新业务口径要求：`CR2477` 电池容量固定为 `1000mAh`。
+- 当前规格型号固定容量映射仅覆盖 `CR2032`、`CR3032`，会导致 `CR2477` 未命中固定容量规则。
+
+根因
+
+- `_parse_spec()` 的 `fixed_capacity_mah` 映射缺少 `CR2477`。
+- 规则文档中也没有 `CR2477` 的固定容量口径，后续维护容易再次遗漏。
+
+改动位置
+
+- `scripts/backend_server.py`
+- `scripts/test_regression.py`
+- `模板填写规则`
+
+改动内容
+
+- 固定容量映射新增：
+  - `CR2477 -> 1000mAh`
+- 回归脚本新增断言：
+  - `CR2477-3V` 解析结果必须为 `model=CR2477`、`capacity=1000mAh`
+- 模板规则文档补充 `CR2477` 示例与固定容量说明。
+
+验证
+
+- `python -m py_compile scripts/backend_server.py scripts/test_regression.py`
+- `python scripts/test_regression.py`
+- 部署后服务器回归 `_parse_spec('CR2477-3V')` 返回 `1000mAh`
 
 ### [pending] 2026-07-21 — fix: BK 抬头补齐新税号覆盖
 

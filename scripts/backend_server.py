@@ -460,6 +460,7 @@ def _parse_spec(spec: str) -> dict:
 
     fixed_capacity_mah = {
         'CR2032': 210,
+        'CR2477': 1000,
         'CR3032': 580,
         'HPC152': 90,
     }
@@ -543,7 +544,7 @@ def _parse_spec(spec: str) -> dict:
             result['capacity_unit'] = m.group(2).lower()
             break
 
-    # 固定容量规则：CR2032=210mAh，CR3032=580mAh。
+    # 固定容量规则：CR2032=210mAh，CR2477=1000mAh，CR3032=580mAh。
     if result['capacity_value'] is None and model in fixed_capacity_mah:
         result['capacity_value'] = float(fixed_capacity_mah[model])
         result['capacity_unit'] = 'mah'

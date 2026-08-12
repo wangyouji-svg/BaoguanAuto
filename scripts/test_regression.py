@@ -10,6 +10,12 @@ def _urlsafe_b64_json(text: str) -> str:
 
 def main():
     mod = importlib.import_module("backend_server")
+    parsed = mod._parse_spec("CR2477-3V")
+    assert parsed["model"] == "CR2477"
+    assert parsed["capacity_value"] == 1000.0
+    assert parsed["capacity_unit"] == "mah"
+    assert parsed["capacity_mah"] == 1000.0
+
     tmpdir = tempfile.mkdtemp(prefix="baoguan-regression-")
     generated_dir = os.path.join(tmpdir, "generated")
     os.makedirs(generated_dir, exist_ok=True)
