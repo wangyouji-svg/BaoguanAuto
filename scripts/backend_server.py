@@ -459,15 +459,29 @@ def _parse_spec(spec: str) -> dict:
     }
 
     fixed_capacity_mah = {
+        'CR1025': 30,
+        'CR1220': 40,
+        'CR1225': 50,
+        'CR1616': 50,
+        'CR1620': 70,
+        'CR1632': 120,
+        'CR2016': 76,
+        'CR2025': 150,
         'CR2032': 210,
+        'CR2320': 130,
+        'CR2325': 210,
+        'CR2330': 260,
+        'CR2430': 270,
+        'CR2450': 600,
         'CR2477': 1000,
         'CR3032': 580,
+        'CR2': 850,
+        'CR123A': 1500,
         'HPC152': 90,
     }
 
-    fixed_voltage = {
-        'HPC152': 4.0,
-    }
+    fixed_voltage = {model: 3.0 for model in fixed_capacity_mah if model.startswith('CR')}
+    fixed_voltage['HPC152'] = 4.0
 
     if not parts:
         return result
@@ -483,9 +497,9 @@ def _parse_spec(spec: str) -> dict:
     model = ''
     capacity_from_model = None
 
-    # 优先识别常见扣式/锂锰型号：LIR2032 / CR2032 / CR3032
+    # 优先识别 CR/LIR 型号，包括圆柱形 CR2、CR123A。
     for up in upper_parts:
-        if re.match(r'^(LIR|CR)\d{3,4}$', up):
+        if re.match(r'^(?:LIR\d{3,4}|CR(?:\d{1,4}|123A))$', up):
             model = up
             break
 
@@ -544,7 +558,7 @@ def _parse_spec(spec: str) -> dict:
             result['capacity_unit'] = m.group(2).lower()
             break
 
-    # 固定容量规则：CR2032=210mAh，CR2477=1000mAh，CR3032=580mAh。
+    # 已知 CR 型号使用业务默认容量；规格显式写出 mAh/mWh 时仍以显式值为准。
     if result['capacity_value'] is None and model in fixed_capacity_mah:
         result['capacity_value'] = float(fixed_capacity_mah[model])
         result['capacity_unit'] = 'mah'
@@ -579,7 +593,7 @@ def _parse_spec(spec: str) -> dict:
             result['capacity_value'] = float(m.group(1))
             result['capacity_unit'] = 'mah'
 
-    # 固定电压规则优先于规格中的普通电压片段（如 HPC152=4.0V）。
+    # 固定电压规则优先于规格中的普通电压片段（CR=3.0V，HPC152=4.0V）。
     if model in fixed_voltage:
         result['voltage_v'] = fixed_voltage[model]
 
@@ -624,6 +638,8 @@ def build_product_name(row: dict, pack_qty=None, pack_net=None) -> str:
     # 解析规格型号
     parsed = _parse_spec(spec)
     bit7 = parsed['model']
+    if bit7 in {'CR2', 'CR123A'}:
+        bit4 = '圆柱形'
 
     capacity_value = parsed.get('capacity_value')
     capacity_unit = parsed.get('capacity_unit')
@@ -693,7 +709,7 @@ def _normalize_domestic_origin(value) -> str:
     text = str(value or '').strip()
     if not text:
         return ''
-    if text.endswith('特区') or text.endswith('其他'):
+    if re.search(r'(?:特区|其他)(?:\s+\d+)?$', text):
         return text
     base = text[:-1] if text.endswith('市') else text
     if base in {'深圳', '珠海'}:

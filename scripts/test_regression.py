@@ -10,11 +10,51 @@ def _urlsafe_b64_json(text: str) -> str:
 
 def main():
     mod = importlib.import_module("backend_server")
-    parsed = mod._parse_spec("CR2477-3V")
-    assert parsed["model"] == "CR2477"
-    assert parsed["capacity_value"] == 1000.0
-    assert parsed["capacity_unit"] == "mah"
-    assert parsed["capacity_mah"] == 1000.0
+    fixed_cr_capacity_mah = {
+        "CR1025": 30,
+        "CR1220": 40,
+        "CR1225": 50,
+        "CR1616": 50,
+        "CR1620": 70,
+        "CR1632": 120,
+        "CR2016": 76,
+        "CR2025": 150,
+        "CR2032": 210,
+        "CR2320": 130,
+        "CR2325": 210,
+        "CR2330": 260,
+        "CR2430": 270,
+        "CR2450": 600,
+        "CR2477": 1000,
+        "CR3032": 580,
+        "CR2": 850,
+        "CR123A": 1500,
+    }
+    for model, expected_capacity in fixed_cr_capacity_mah.items():
+        parsed = mod._parse_spec(f"PKCELL-{model}")
+        assert parsed["model"] == model, (model, parsed)
+        assert parsed["capacity_value"] == float(expected_capacity), (model, parsed)
+        assert parsed["capacity_unit"] == "mah", (model, parsed)
+        assert parsed["capacity_mah"] == float(expected_capacity), (model, parsed)
+        assert parsed["voltage_v"] == 3.0, (model, parsed)
+
+    for spec, expected_capacity in (
+        ("PKCELL-CR2032-220mAh-3V", 220.0),
+        ("PKCELL-CR2477-900mAh-3V", 900.0),
+    ):
+        parsed = mod._parse_spec(spec)
+        assert parsed["capacity_mah"] == expected_capacity, parsed
+
+    base_row = {
+        "商品编号": "8506500090",
+        "品牌": "PKCELL",
+    }
+    cr2_parts = mod.build_product_name({**base_row, "规格型号": "PKCELL-CR2"}).split("|")
+    assert cr2_parts[3] == "圆柱形", cr2_parts
+    assert cr2_parts[4] == "二氧化锰+铁+锂", cr2_parts
+    button_parts = mod.build_product_name({**base_row, "规格型号": "PKCELL-CR1220"}).split("|")
+    assert button_parts[3] == "纽扣形", button_parts
+    assert mod._normalize_domestic_origin("常州其他 32049") == "常州其他 32049"
 
     tmpdir = tempfile.mkdtemp(prefix="baoguan-regression-")
     generated_dir = os.path.join(tmpdir, "generated")
