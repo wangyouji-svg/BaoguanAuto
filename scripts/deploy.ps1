@@ -1,5 +1,5 @@
-# 报关资料后端 - 服务器部署脚本
-# 用法：在本地 PowerShell 执行：.\deploy.ps1
+# Customs document backend deployment.
+# Run locally with: .\deploy.ps1
 
 $ErrorActionPreference = 'Stop'
 $Server = 'root@101.96.212.128'
@@ -18,7 +18,7 @@ $Files = @(
     'test_dingtalk_batch.js'
 )
 
-Write-Host '1. 上传版本文件到临时目录' -ForegroundColor Cyan
+Write-Host '1. Uploading release files to staging' -ForegroundColor Cyan
 ssh $Server "mkdir -p '$StageDir/mysql_migrations'"
 foreach ($File in $Files) {
     scp (Join-Path $PSScriptRoot $File) "${Server}:${StageDir}/$File"
@@ -28,7 +28,7 @@ scp (Join-Path $PSScriptRoot '..\requirements.txt') "${Server}:${StageDir}/requi
 scp (Join-Path $PSScriptRoot '..\README.md') "${Server}:${StageDir}/README.md"
 scp (Join-Path $PSScriptRoot '..\CHANGELOG.md') "${Server}:${StageDir}/CHANGELOG.md"
 
-Write-Host '2. 安装依赖、切换文件并重启 systemd 服务' -ForegroundColor Cyan
+Write-Host '2. Installing dependencies and restarting systemd service' -ForegroundColor Cyan
 ssh $Server @"
 set -eu
 test -f '$RemoteDir/.env.mysql'
@@ -52,6 +52,6 @@ journalctl -u baoguan -n 50 --no-pager
 exit 1
 "@
 
-Write-Host '3. MySQL 健康检查通过，部署完成' -ForegroundColor Green
-Write-Host '地址：https://pkcellsolution.com/baoguan/generate' -ForegroundColor Yellow
-Write-Host '说明：.env.mysql 只保存在服务器，脚本不会上传或覆盖数据库密钥。' -ForegroundColor Yellow
+Write-Host '3. MySQL health check passed; deployment completed' -ForegroundColor Green
+Write-Host 'URL: https://pkcellsolution.com/baoguan/generate' -ForegroundColor Yellow
+Write-Host 'The server-only .env.mysql file is never uploaded or overwritten.' -ForegroundColor Yellow
