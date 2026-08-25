@@ -20,13 +20,19 @@ $Files = @(
 
 Write-Host '1. Uploading release files to staging' -ForegroundColor Cyan
 ssh $Server "mkdir -p '$StageDir/mysql_migrations'"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to create remote staging directory.' }
 foreach ($File in $Files) {
     scp (Join-Path $PSScriptRoot $File) "${Server}:${StageDir}/$File"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to upload $File." }
 }
 scp (Join-Path $PSScriptRoot 'mysql_migrations\*.sql') "${Server}:${StageDir}/mysql_migrations/"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to upload MySQL migrations.' }
 scp (Join-Path $PSScriptRoot '..\requirements.txt') "${Server}:${StageDir}/requirements.txt"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to upload requirements.txt.' }
 scp (Join-Path $PSScriptRoot '..\README.md') "${Server}:${StageDir}/README.md"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to upload README.md.' }
 scp (Join-Path $PSScriptRoot '..\CHANGELOG.md') "${Server}:${StageDir}/CHANGELOG.md"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to upload CHANGELOG.md.' }
 
 Write-Host '2. Installing dependencies and restarting systemd service' -ForegroundColor Cyan
 ssh $Server @"
@@ -51,6 +57,7 @@ done
 journalctl -u baoguan -n 50 --no-pager
 exit 1
 "@
+if ($LASTEXITCODE -ne 0) { throw 'Remote deployment or health check failed.' }
 
 Write-Host '3. MySQL health check passed; deployment completed' -ForegroundColor Green
 Write-Host 'URL: https://pkcellsolution.com/baoguan/generate' -ForegroundColor Yellow
