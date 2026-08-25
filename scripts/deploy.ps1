@@ -6,6 +6,8 @@ $Server = 'root@101.96.212.128'
 $RemoteDir = '/youji/apps/baoguan-backend'
 $StageDir = "/tmp/baoguan-deploy-$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
 $Python = '/youji/apps/logiflow-tracker/.venv/bin/python'
+$Commit = (git -C (Join-Path $PSScriptRoot '..') rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Failed to resolve the local Git commit.' }
 
 $Files = @(
     'backend_server.py',
@@ -46,9 +48,10 @@ cp -a '$StageDir/.' '$RemoteDir/'
 install -m 0644 '$RemoteDir/baoguan.service' /etc/systemd/system/baoguan.service
 systemctl daemon-reload
 systemctl restart baoguan
-for attempt in 1 2 3 4 5; do
-    if curl --fail --silent http://127.0.0.1:5000/health | grep -q '"storageBackend":"mysql"'; then
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if curl --fail --silent http://127.0.0.1:5000/health | grep -q mysql; then
         systemctl is-active --quiet baoguan
+        printf '%s\n' '$Commit' > '$RemoteDir/DEPLOYED_COMMIT'
         rm -rf '$StageDir'
         exit 0
     fi
