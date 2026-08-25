@@ -4,19 +4,19 @@
 
 当前稳定方案是：
 
-- 钉钉脚本同步上传 rows 到后端临时缓存（短 token 模式）
+- 钉钉脚本把多个合同合并为一次请求，批量上传 rows 到远程 MySQL 临时缓存（短 token 模式）
 - 用户点击短链接后，由后端按 token 取回 rows 并实时生成 Excel 下载
 - 同一个 token 首次下载后会复用已生成文件，重复点击不会重复生成
 
 ### 实现的核心原理
 
-这套方案是“短 token + 服务端临时缓存”，不再把整包数据塞进 URL。
+这套方案是“短 token + 服务端 MySQL 临时缓存”，不再把整包数据塞进 URL。
 
 更直白地说：
 
-1. 钉钉脚本先读取 `报关数据`，把当前合同号码对应的行整理成 `{"rows": [...]}`。
-2. 脚本同步调用后端缓存接口 `POST /generate?cache=1`。
-3. 后端把 rows 存入 SQLite 临时缓存，返回短 token。
+1. 钉钉脚本先读取 `报关数据`，把全部目标合同整理成 `{"items": [{"rows": [...]}]}`。
+2. 脚本同步调用一次批量缓存接口 `POST /generate?cache=1&batch=1`。
+3. 后端在同一 MySQL 事务中为每个合同保存 rows，并分别返回短 token。
 4. 脚本把 `https://pkcellsolution.com/baoguan/generate?t=<token>` 写回 `报关资料`。
 5. 用户点击链接后，后端按 token 取回 rows，现场生成 Excel 并返回下载。
 6. 若同一个 token 被再次点击，后端直接复用上一次已生成文件，不再重复填模板。
@@ -31,7 +31,7 @@
 
 需要注意的是：
 
-- 前端到后端缓存写入仍是 `https` 请求，只是下载链接变为短 token 方式。
+- 前端到后端缓存写入仍是 `https` 请求，但整批合同只发一次；批量接口不可用时会回退旧的逐合同接口。
 - token 临时缓存有效期为 48 小时，超时后需要重新生成链接。
 - 同一个 token 的首次下载仍然会实时生成，后续重复点击走文件复用，因此第一次和第二次耗时差异会很明显。
 - 生成目录中的历史 Excel 默认仅保留近 30 天，避免目录持续膨胀。
@@ -57,6 +57,9 @@
 
 - `scripts/dingtalk_demo.js`：钉钉多维表格脚本（当前为纯同步版本）
 - `scripts/backend_server.py`：Flask 后端，负责模板填充、文件生成、下载
+- `scripts/mysql_database.py`：MySQL 连接池、SQL 适配、TLS 校验与异步日志写入
+- `scripts/migrate_to_mysql.py`：SQLite 业务数据和历史文本日志的一次性迁移工具
+- `scripts/mysql_migrations/`：按版本管理且应用后不可修改的 MySQL 结构迁移
 - `报关资料模板（只有一个商品）.xlsx`：单商品模板
 - `报关资料模板（有多个商品）.xlsx`：多商品模板
 - `generated/`：后端生成的文件目录
@@ -69,11 +72,11 @@
 
 1. 用户在 `报关资料` sheet 的 A2 起填写合同号码。
 2. 运行 `scripts/dingtalk_demo.js`。
-3. 脚本读取主数据表，按合同号码筛选行，构造 `{"rows": [...]}`。
-4. 脚本把 rows 直接 POST 到 `https://pkcellsolution.com/baoguan/generate?cache=1`，服务器写入 SQLite 临时缓存并返回短 token。
+3. 脚本读取主数据表，按合同号码筛选行，构造批量 `items`。
+4. 脚本只调用一次 `https://pkcellsolution.com/baoguan/generate?cache=1&batch=1`，服务器批量写入 MySQL 并返回各合同的短 token。
 5. 脚本将短链接写入 B 列，形如：
    - `https://pkcellsolution.com/baoguan/generate?t=<token>&trace_id=<TraceId>`
-6. 用户点击链接，后端按 token 从 SQLite 取回 rows，填充模板并返回下载文件流。
+6. 用户点击链接，后端按 token 从 MySQL 取回 rows，填充模板并返回下载文件流。
 7. 若用户重复点击同一个短链接，后端直接复用已生成文件，不再重复计算。
 
 ---
@@ -82,25 +85,56 @@
 
 ### 4.1 代码与依赖
 
-在服务器部署目录（示例：`/root/baoguan-backend`）准备：
+在服务器部署目录（当前为 `/youji/apps/baoguan-backend`）准备：
 
 - `backend_server.py`
 - `报关资料模板（只有一个商品）.xlsx`
 - `报关资料模板（有多个商品）.xlsx`
-- Python 环境依赖（至少 `flask`、`openpyxl`）
+- Python 环境依赖（见 `requirements.txt`，包括 `flask`、`openpyxl`、`PyMySQL` 和 `python-dotenv`）
 
-### 4.2 启动方式
+### 4.2 MySQL 配置与数据职责
+
+生产环境通过仅服务器可读的 `/youji/apps/baoguan-backend/.env.mysql` 注入配置，字段示例见 `.env.example`。严禁把真实账号、密码或证书提交到 Git；服务默认要求 TLS，并固定使用 `baoguan_data` database。
+
+MySQL 中的主要对象：
+
+- `request_cache`：短 token、TraceId、业务 rows 与过期时间。
+- `generated_files`：token 对应的已生成文件元数据；Excel 文件实体仍保存在服务器 `generated/` 目录。
+- `application_logs`：结构化运行日志和已迁移的历史文本日志。
+- `data_migration_runs`：数据迁移批次、校验结果与报告。
+- `schema_migrations`：结构迁移版本及校验和，已应用的 SQL 文件不可修改。
+- `generation_activity_view`：生成活动的联合查询视图。
+
+`backend_access.log` 与 `server.log` 继续保留为本地降级副本；正常运行时，业务数据和结构化日志以 MySQL 为准。`GET /health` 会检查数据库连通性并返回当前 `storageBackend`。
+
+### 4.3 启动方式
 
 示例：
 
 ```bash
-cd /root/baoguan-backend
+cd /youji/apps/baoguan-backend
 python3 backend_server.py
 ```
 
 推荐使用 systemd 托管（已有 `baoguan.service`）。
 
-### 4.3 nginx 反向代理
+### 4.4 首次迁移与校验
+
+迁移前应先停止业务写入并保留 SQLite 与日志备份，然后执行：
+
+```bash
+cd /youji/apps/baoguan-backend
+/youji/apps/logiflow-tracker/.venv/bin/python migrate_to_mysql.py \
+  --env .env.mysql \
+  --source generated/request_cache.sqlite3 \
+  --log backend_access.log \
+  --log server.log \
+  --report migration-report.json
+```
+
+迁移工具会创建一致性 SQLite 快照，以 token 校验业务表，并按“来源文件 + 行号 + 原文”指纹幂等导入日志。完成后将 `STORAGE_BACKEND=mysql` 写入 systemd 环境并重启服务；旧 SQLite 文件保留作只读回滚证据，不再作为生产写入源。
+
+### 4.5 nginx 反向代理
 
 当前可用路径：
 
@@ -112,12 +146,12 @@ python3 backend_server.py
 - 实际生产使用 `https://pkcellsolution.com/baoguan/generate`（经 BunnyCDN）
 - 曾尝试新增 `/gen`，但 CDN 路由策略导致 `/baoguan/gen` 不稳定，最终统一复用 `/generate`
 
-### 4.4 CORS 约定
+### 4.6 CORS 约定
 
 当前 CORS 分工：
 
 - BunnyCDN：自动注入 `Access-Control-Allow-Origin`、`Access-Control-Allow-Headers`
-- Flask：只补 `Access-Control-Allow-Methods`
+- Flask：补 `Access-Control-Allow-Methods` 和 `Access-Control-Max-Age: 600`
 - nginx：不再额外添加 CORS 头
 
 目的：避免重复 CORS 头触发浏览器拒绝。
@@ -160,7 +194,7 @@ python3 backend_server.py
 ### 6.1 前端脚本规则（`dingtalk_demo.js`）
 
 1. 固定读取 `报关数据`，固定回填 `报关资料`。
-2. 对目标合同号码逐条生成下载链接，不在脚本内发网络请求。
+2. 先收集全部目标合同，再通过一次批量请求生成所有下载链接。
 3. 非阻断策略：
    - 缺少列名或字段值时，不终止流程。
    - 在 G 列写备注，提示人工复核。
@@ -170,9 +204,9 @@ python3 backend_server.py
 
 ### 6.2 后端填报规则（`backend_server.py`）
 
-1. 接口支持：`GET /generate?d=...`、`GET /generate?t=...`、`POST /generate` 与 `POST /cache`。
+1. 接口支持：`GET /generate?d=...`、`GET /generate?t=...`、`POST /generate`、`POST /generate?cache=1&batch=1` 与 `POST /cache`。
 2. 缓存写入与模板自动选择：
-   - 钉钉脚本直接写入 `POST /generate?cache=1`，后端落到 SQLite 临时缓存并返回短 token。
+   - 钉钉脚本优先写入 `POST /generate?cache=1&batch=1`，后端在一个事务中为整批合同生成短 token；失败时回退旧单合同接口。
    - 短 token 下载链路具备幂等复用能力：同 token 首次生成后，后续重复下载直接返回已生成文件。
    - 商品明细 1 条：单商品模板
    - 商品明细 >1 条：多商品模板
@@ -242,7 +276,7 @@ journalctl -u baoguan -n 200 --no-pager
 - 访问日志（本次新增）：
 
 ```bash
-tail -n 100 /root/baoguan-backend/backend_access.log
+tail -n 100 /youji/apps/baoguan-backend/backend_access.log
 ```
 
 日志会记录：TraceId、方法、路径、状态码、耗时、`d` 参数长度、业务阶段、错误码、异常信息。
@@ -258,8 +292,8 @@ tail -n 100 /root/baoguan-backend/backend_access.log
 按 TraceId 检索：
 
 ```bash
-grep 'trace_id=BG-' /root/baoguan-backend/backend_access.log | tail -n 50
-grep 'trace_id=<你的TraceId>' /root/baoguan-backend/backend_access.log
+grep 'trace_id=BG-' /youji/apps/baoguan-backend/backend_access.log | tail -n 50
+grep 'trace_id=<你的TraceId>' /youji/apps/baoguan-backend/backend_access.log
 ```
 
 ### 7.2 快速检查项
@@ -296,14 +330,14 @@ grep 'trace_id=<你的TraceId>' /root/baoguan-backend/backend_access.log
 
 ### Q3：如果 URL 太长怎么办？
 
-当前推荐模式是短 token + SQLite 临时缓存，不再把整包数据塞进 URL。
+当前推荐模式是短 token + MySQL 临时缓存，不再把整包数据塞进 URL。
 如果仍走旧的 `d` 直链模式，URL 仍受浏览器、CDN、nginx、HTTP 请求行长度限制；超限时通常会返回 `414 Request-URI Too Large`。
 
 ### Q4：下载链接会过期吗？
 
 会过期。
 
-- 短 token 链接依赖 SQLite 临时缓存，默认有效期 48 小时。
+- 短 token 链接依赖 MySQL 临时缓存，默认有效期 48 小时。
 - 超过有效期后，`/generate?t=<token>` 会返回“token 无效或已过期”，需要在钉钉重新生成。
 - 另外，服务器 `generated/` 目录中的历史 Excel 默认只保留近 30 天，旧文件会被自动清理。
 

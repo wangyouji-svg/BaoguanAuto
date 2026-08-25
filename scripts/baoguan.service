@@ -4,13 +4,15 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/baoguan-backend
-ExecStart=/root/logiflow-tracker/.venv/bin/python backend_server.py
+WorkingDirectory=/youji/apps/baoguan-backend
+ExecStart=/youji/apps/logiflow-tracker/.venv/bin/python backend_server.py
+EnvironmentFile=/youji/apps/baoguan-backend/.env.mysql
+Environment=STORAGE_BACKEND=mysql
 Environment=PUBLIC_BASE_URL=https://pkcellsolution.com/baoguan
 Restart=always
 RestartSec=5
-StandardOutput=append:/root/baoguan-backend/server.log
-StandardError=append:/root/baoguan-backend/server.log
+StandardOutput=append:/youji/apps/baoguan-backend/server.log
+StandardError=append:/youji/apps/baoguan-backend/server.log
 
 [Install]
 WantedBy=multi-user.target

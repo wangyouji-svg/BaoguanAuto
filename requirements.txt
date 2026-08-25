@@ -1,3 +1,5 @@
 flask
 openpyxl
 gunicorn
+PyMySQL==1.2.0
+python-dotenv==1.2.2

@@ -24,6 +24,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.exceptions import HTTPException
 import openpyxl
 from openpyxl.cell.cell import MergedCell
+from mysql_database import AsyncMySQLLogHandler, MYSQL_INTEGRITY_ERRORS, MySQLDatabase
 
 app = Flask(__name__)
 
@@ -39,8 +40,15 @@ app.logger.setLevel(logging.INFO)
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
 CACHE_DB_PATH = os.path.join(_script_dir, 'generated', 'request_cache.sqlite3')
+STORAGE_BACKEND = os.environ.get('STORAGE_BACKEND', 'sqlite').strip().lower()
+if STORAGE_BACKEND not in {'sqlite', 'mysql'}:
+    raise ValueError('STORAGE_BACKEND must be sqlite or mysql')
+_MYSQL_DATABASE = MySQLDatabase.from_env() if STORAGE_BACKEND == 'mysql' else None
+_MYSQL_LOG_HANDLER = None
+_DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + MYSQL_INTEGRITY_ERRORS
 CACHE_TTL_SECONDS = 48 * 3600
 GENERATED_EXCEL_TTL_SECONDS = 30 * 24 * 3600
+MAX_BATCH_CACHE_ITEMS = 500
 _TOKEN_LOCKS: dict[str, threading.Lock] = {}
 _TOKEN_LOCKS_GUARD = threading.Lock()
 
@@ -51,6 +59,8 @@ def _request_trace_id() -> str:
 
 
 def _cache_connect():
+    if _MYSQL_DATABASE is not None:
+        return _MYSQL_DATABASE.connect()
     conn = sqlite3.connect(CACHE_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
@@ -59,6 +69,14 @@ def _cache_connect():
 
 
 def _init_cache_db():
+    global _MYSQL_LOG_HANDLER
+    if _MYSQL_DATABASE is not None:
+        _MYSQL_DATABASE.initialize()
+        if _MYSQL_LOG_HANDLER is None:
+            _MYSQL_LOG_HANDLER = AsyncMySQLLogHandler(_MYSQL_DATABASE)
+            app.logger.addHandler(_MYSQL_LOG_HANDLER)
+        return
+
     with _cache_connect() as conn:
         conn.execute(
             '''
@@ -91,24 +109,40 @@ def _cleanup_cache(conn, now=None):
     conn.execute('DELETE FROM request_cache WHERE expires_at < ?', (now,))
 
 
+def _insert_cache_payload(conn, payload: dict, trace_id: str, now: int, expires_at: int) -> str:
+    payload_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    for _ in range(5):
+        token = secrets.token_urlsafe(8)
+        try:
+            conn.execute(
+                'INSERT INTO request_cache(token, trace_id, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
+                (token, trace_id, payload_text, now, expires_at),
+            )
+            return token
+        except _DB_INTEGRITY_ERRORS:
+            continue
+    raise RuntimeError('生成缓存 token 失败')
+
+
 def _store_cache_payload(payload: dict, trace_id: str) -> tuple[str, int]:
     now = int(time.time())
     expires_at = now + CACHE_TTL_SECONDS
-    payload_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
-
     with _cache_connect() as conn:
         _cleanup_cache(conn, now)
-        for _ in range(5):
-            token = secrets.token_urlsafe(8)
-            try:
-                conn.execute(
-                    'INSERT INTO request_cache(token, trace_id, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
-                    (token, trace_id, payload_text, now, expires_at),
-                )
-                return token, expires_at
-            except sqlite3.IntegrityError:
-                continue
-    raise RuntimeError('生成缓存 token 失败')
+        token = _insert_cache_payload(conn, payload, trace_id, now, expires_at)
+    return token, expires_at
+
+
+def _store_cache_payload_batch(entries: list[tuple[dict, str]]) -> list[tuple[str, int]]:
+    now = int(time.time())
+    expires_at = now + CACHE_TTL_SECONDS
+    stored = []
+    with _cache_connect() as conn:
+        _cleanup_cache(conn, now)
+        for payload, trace_id in entries:
+            token = _insert_cache_payload(conn, payload, trace_id, now, expires_at)
+            stored.append((token, expires_at))
+    return stored
 
 
 def _load_cache_payload(token: str):
@@ -1297,10 +1331,86 @@ def _cache_rows_response(rows: list, trace_id: str, script_version: str, event_n
     return jsonify({'token': token, 'url': url, 'traceId': trace_id, 'expiresAt': expires_at})
 
 
+def _cache_rows_batch_response(data: dict, batch_trace_id: str):
+    items = data.get('items') if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items or len(items) > MAX_BATCH_CACHE_ITEMS:
+        message = f'items 必须包含 1-{MAX_BATCH_CACHE_ITEMS} 个合同'
+        app.logger.warning('ERR trace_id=%s code=BG4005 msg=invalid_batch_size', batch_trace_id)
+        return jsonify({'error': message, 'code': 'BG4005', 'traceId': batch_trace_id}), 400
+
+    batch_meta = data.get('meta') if isinstance(data.get('meta'), dict) else {}
+    prepared = []
+    results = [None] * len(items)
+    for index, item in enumerate(items):
+        item = item if isinstance(item, dict) else {}
+        item_meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+        trace_id = str(item_meta.get('traceId') or f'{batch_trace_id}-{index + 1}').strip()
+        rows = item.get('rows', [])
+        ok, msg = _validate_rows(rows)
+        if not ok:
+            results[index] = {
+                'ok': False,
+                'error': msg,
+                'code': 'BG4003',
+                'traceId': trace_id,
+            }
+            continue
+
+        rows = _normalize_rows(rows)
+        contract_no = _extract_contract_no(rows)
+        script_version = str(item_meta.get('scriptVersion') or batch_meta.get('scriptVersion') or '')
+        payload = {
+            'rows': rows,
+            'meta': {
+                'traceId': trace_id,
+                'contractNo': contract_no,
+                'scriptVersion': script_version,
+            },
+        }
+        prepared.append((index, payload, trace_id, contract_no, len(rows)))
+
+    stored = _store_cache_payload_batch([(entry[1], entry[2]) for entry in prepared])
+    public_base = os.environ.get('PUBLIC_BASE_URL', request.host_url.rstrip('/'))
+    for entry, (token, expires_at) in zip(prepared, stored):
+        index, _, trace_id, contract_no, row_count = entry
+        url = f'{public_base}/generate?t={token}&trace_id={trace_id}'
+        results[index] = {
+            'ok': True,
+            'token': token,
+            'url': url,
+            'traceId': trace_id,
+            'expiresAt': expires_at,
+        }
+        app.logger.info(
+            'CACHE trace_id=%s event=batch_cache_store contract_no=%s token=%s row_count=%s',
+            trace_id,
+            contract_no,
+            token,
+            row_count,
+        )
+
+    success_count = len(prepared)
+    failure_count = len(items) - success_count
+    app.logger.info(
+        'CACHE trace_id=%s event=batch_cache_done item_count=%s success_count=%s failure_count=%s',
+        batch_trace_id,
+        len(items),
+        success_count,
+        failure_count,
+    )
+    return jsonify({
+        'items': results,
+        'successCount': success_count,
+        'failureCount': failure_count,
+        'traceId': batch_trace_id,
+    })
+
+
 
 def _add_cors(response):
     # BunnyCDN 已自动注入 Allow-Origin 和 Allow-Headers，这里只补 Allow-Methods（BunnyCDN 不加这个）
     response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+    response.headers['Access-Control-Max-Age'] = '600'
     return response
 
 
@@ -1342,6 +1452,17 @@ def handle_unexpected_error(exc):
     trace_id = _request_trace_id()
     app.logger.exception('UNHANDLED trace_id=%s method=%s path=%s code=BG5000 err=%s', trace_id, request.method, request.path, str(exc))
     return f'BG5000 服务器内部错误（traceId={trace_id}）', 500
+
+
+@app.route('/health')
+def health():
+    try:
+        storage_ok = _MYSQL_DATABASE.ping() if _MYSQL_DATABASE is not None else True
+    except Exception:
+        app.logger.exception('UNHANDLED trace_id=%s method=GET path=/health code=BG5001 err=storage_unavailable', _request_trace_id())
+        return jsonify({'status': 'unhealthy', 'storageBackend': STORAGE_BACKEND}), 503
+    status = 'ok' if storage_ok else 'unhealthy'
+    return jsonify({'status': status, 'storageBackend': STORAGE_BACKEND}), 200 if storage_ok else 503
 
 
 @app.route('/generate', methods=['GET', 'POST', 'OPTIONS'])
@@ -1417,6 +1538,9 @@ def generate():
     # POST: 原有逻辑（保留兼容性）
     data = request.get_json(force=True)
     trace_id = _request_trace_id()
+    if isinstance(data, dict) and 'items' in data:
+        return _cache_rows_batch_response(data, trace_id)
+
     rows = data.get('rows', [])
     ok, msg = _validate_rows(rows)
     if not ok:
@@ -1462,6 +1586,15 @@ def cache_rows():
         (data.get('meta') or {}).get('scriptVersion', ''),
         'cache_store',
     )
+
+
+@app.route('/cache/batch', methods=['POST', 'OPTIONS'])
+def cache_rows_batch():
+    if request.method == 'OPTIONS':
+        return _add_cors(app.response_class(status=204))
+
+    data = request.get_json(force=True)
+    return _cache_rows_batch_response(data, _request_trace_id())
 
 
 

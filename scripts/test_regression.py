@@ -77,6 +77,9 @@ def main():
     mod.fill_template = fake_fill_template
 
     client = mod.app.test_client()
+    health_resp = client.get("/health?trace_id=BG-HEALTH-TEST")
+    assert health_resp.status_code == 200
+    assert health_resp.get_json() == {"status": "ok", "storageBackend": "sqlite"}
     rows = [
         {
             "合同号码": "PK-TEST-001",
@@ -105,6 +108,68 @@ def main():
     assert payload["traceId"] == "BG-TEST-001"
     assert "trace_id=BG-TEST-001" in payload["url"]
     token = payload["token"]
+
+    batch_items = []
+    for index in range(3):
+        batch_rows = [dict(rows[0], **{"合同号码": f"PK-BATCH-{index + 1:03d}"})]
+        batch_items.append(
+            {
+                "rows": batch_rows,
+                "meta": {
+                    "traceId": f"BG-BATCH-{index + 1:03d}",
+                    "scriptVersion": "batch-test",
+                },
+            }
+        )
+    batch_items.insert(
+        1,
+        {
+            "rows": [],
+            "meta": {"traceId": "BG-BATCH-INVALID", "scriptVersion": "batch-test"},
+        },
+    )
+
+    batch_resp = client.post(
+        "/generate?cache=1&batch=1&trace_id=BG-BATCH",
+        json={"items": batch_items, "meta": {"scriptVersion": "batch-test"}},
+    )
+    assert batch_resp.status_code == 200, batch_resp.get_data(as_text=True)
+    batch_payload = batch_resp.get_json()
+    assert batch_payload["successCount"] == 3, batch_payload
+    assert batch_payload["failureCount"] == 1, batch_payload
+    assert [item["traceId"] for item in batch_payload["items"]] == [
+        "BG-BATCH-001",
+        "BG-BATCH-INVALID",
+        "BG-BATCH-002",
+        "BG-BATCH-003",
+    ]
+    assert batch_payload["items"][1]["ok"] is False, batch_payload
+    assert batch_payload["items"][1]["code"] == "BG4003", batch_payload
+    valid_batch_results = [item for item in batch_payload["items"] if item["ok"]]
+    assert len({item["token"] for item in valid_batch_results}) == 3
+    assert all("trace_id=" in item["url"] for item in valid_batch_results)
+
+    empty_batch_resp = client.post("/generate?cache=1&batch=1", json={"items": []})
+    assert empty_batch_resp.status_code == 400
+    assert empty_batch_resp.get_json()["code"] == "BG4005"
+
+    oversized_batch_resp = client.post(
+        "/generate?cache=1&batch=1",
+        json={"items": [{} for _ in range(mod.MAX_BATCH_CACHE_ITEMS + 1)]},
+    )
+    assert oversized_batch_resp.status_code == 400
+    assert oversized_batch_resp.get_json()["code"] == "BG4005"
+
+    options_resp = client.options(
+        "/generate?cache=1&batch=1",
+        headers={
+            "Origin": "https://alidocs.dingtalk.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert options_resp.status_code == 204
+    assert options_resp.headers["Access-Control-Max-Age"] == "600"
 
     resp1 = client.get(f"/generate?t={token}&trace_id=BG-TEST-001")
     assert resp1.status_code == 200, resp1.get_data(as_text=True)

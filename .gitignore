@@ -12,6 +12,11 @@ scripts/__pycache__/
 *.log
 scripts/backend_access.log
 
+# deployment secrets
+.env
+.env.*
+!.env.example
+
 # editor / OS
 .DS_Store
 Thumbs.db

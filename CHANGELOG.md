@@ -15,7 +15,7 @@ ssh root@101.96.212.128 "systemctl is-active baoguan"
 ssh root@101.96.212.128 "journalctl -u baoguan -n 200 --no-pager"
 
 # 3) 看新增访问日志（请求路径/状态/耗时/d长度）
-ssh root@101.96.212.128 "tail -n 200 /root/baoguan-backend/backend_access.log"
+ssh root@101.96.212.128 "tail -n 200 /youji/apps/baoguan-backend/backend_access.log"
 
 # 4) 快速探测下载链路
 ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcellsolution.com/baoguan/generate?d=eyJyb3dzIjpbXX0'"
@@ -27,6 +27,8 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 
 | 版本    | 日期       | 类型     | 说明                                                                                   |
 | ------- | ---------- | -------- | -------------------------------------------------------------------------------------- |
+| pending | 2026-08-25 | feat     | 将缓存、生成文件元数据和运行日志迁移至远程 MySQL `baoguan_data`，生产完成切换与校验    |
+| pending | 2026-08-25 | perf     | 批量缓存改造：多个合同合并为一次请求，130 合同公网链接生成由 211.6 秒降至 3.307 秒      |
 | pending | 2026-08-19 | fix      | 补齐 18 个 CR 型号的默认容量/3V规则，并修正 CR2/CR123A 形状和标准货源地保留            |
 | pending | 2026-08-12 | fix      | 规格型号解析补充 `CR2477` 固定容量规则：位8固定为 `1000mAh`                            |
 | pending | 2026-07-21 | fix      | BK 税号补齐：倍苛新能源抬头下报关单税号改为 `91440300MA5DETYT75`，不再沿用模板旧值     |
@@ -81,6 +83,63 @@ ssh root@101.96.212.128 "curl -s -o /dev/null -w '%{http_code}' 'https://pkcells
 ---
 
 ## 详细变更记录
+
+### [pending] 2026-08-25 — feat: 业务数据与日志迁移至远程 MySQL
+
+目标与设计
+
+- 参考 `Engineering_Department_Assistant` 的连接池、版本化迁移、TLS 校验和 SQLite 迁移模式，将生产持久化统一迁移到远程 MySQL `baoguan_data`。
+- MySQL 承载短 token 业务缓存、生成文件元数据、结构化应用日志和迁移审计；Excel 文件实体继续保存在服务器 `generated/` 目录。
+- 生产日志使用有界队列异步写入 MySQL，避免远程数据库往返阻塞下载请求；原 `backend_access.log`、`server.log` 继续作为本地降级副本。
+
+实现
+
+- 新增 `mysql_database.py`，提供 TLS 强制校验、连接池、SQLite 风格参数适配、事务和异步日志处理器。
+- 新增不可变版本迁移 `V001__initial_mysql_storage.sql`，创建 `request_cache`、`generated_files`、`application_logs`、`data_migration_runs`、`schema_migrations` 和 `generation_activity_view`。
+- 新增幂等迁移工具 `migrate_to_mysql.py`：先创建 SQLite 一致性快照，再按 token 校验业务表，并按来源文件、行号和原文指纹去重导入历史日志。
+- `/health` 增加存储连通性检查；systemd 服务通过权限为 `600` 的 `.env.mysql` 注入数据库配置，仓库只保留无密钥的 `.env.example`。
+
+生产迁移结果
+
+- 迁移批次：`6d62557e19ac8ac62a3bf9d030a340ac13e36a3d36298e759b524013db9a9db4`，执行时间为 2026-08-25 18:31:20 至 18:36:55。
+- `request_cache`：源数据 259 条，迁移并按 token 校验 259 条；`generated_files`：源数据 61 条，迁移并按 token 校验 61 条。
+- 历史日志：`backend_access.log` 72,285 条、`server.log` 101,280 条，共迁移 173,565 条；切换后新日志继续写入 MySQL。
+- 迁移前备份保存在 `/youji/apps/baoguan-backend/backups/mysql-20260825-183122`，原 SQLite 保留且切换后未再写入。
+
+验证与上线
+
+- MySQL 结构迁移 gate、7 项 MySQL 单元测试、完整 Python 回归、Node 批量测试、JavaScript 语法检查及安全检查均通过。
+- 生产 `/health` 返回 `status=ok`、`storageBackend=mysql`；MySQL 连接确认使用 TLS。
+- 公网批量写入、首次 Excel 下载、缓存/文件/日志落库均已端到端验证；测试数据和测试文件随后清理。
+- systemd 服务切换后保持 `active`，无自动重启；旧 SQLite 与迁移报告保留用于核查和受控回滚。
+
+### [pending] 2026-08-25 — perf: 合同链接批量缓存与公网提速
+
+问题与根因
+
+- 2026-08-18 至 2026-08-25 的生产日志显示，单次缓存写入后端中位耗时仅 `3ms`，但钉钉脚本使用同步 XHR，按合同逐个执行 `OPTIONS + POST`。
+- 2026-08-25 一批 130 个合同在公网链路上持续 `211.6s`；2026-08-21 一批 366 个合同持续 `453.1s`。
+- 主要耗时来自同步公网往返和未缓存的 CORS 预检，不是数据库、Excel 模板生成或服务器资源不足。
+
+改动
+
+- 后端支持 `POST /generate?cache=1&batch=1`，单次接收最多 500 个合同，并在一个数据库事务中生成独立 token。
+- 批量内单条校验失败不会影响其他合同；响应保持输入顺序，并返回成功/失败计数。
+- 钉钉脚本先收集全部合同，再发出一次批量请求；批量接口不可用时自动回退现有逐合同接口。
+- CORS 响应新增 `Access-Control-Max-Age: 600`，减少重复预检。
+- 保留 `/cache/batch` 内部别名；公网统一使用稳定的 `/baoguan/generate` 路由，避开 CDN 对新增子路径回源失败的问题。
+
+验证与部署
+
+- Python 回归、Node 语法检查、安全检查通过；前端模拟确认 130 个合同只发送 1 次请求并写回 130 个链接。
+- 生产公网以 130 个合同、每合同 4 条商品实测：批量链接生成 `3.307s`，130/130 成功；旧方案同规模为 `211.6s`，提速约 64 倍。
+- 同一测试 token 首次生成并下载 `3.440s`，重复下载 `1.786s`；后端分别耗时 `1086ms` 与 `3ms`。
+- 旧单合同 `POST /generate?cache=1` 回归通过；测试缓存和测试 Excel 已清理。
+- 后端和新版钉钉脚本源文件已部署到 `/youji/apps/baoguan-backend`，备份位于 `/youji/apps/baoguan-backend/backups/20260825-175225`。
+
+上线边界
+
+- 服务器批量接口已经生效；钉钉表格脚本面板仍需同步 `scripts/dingtalk_demo.js` 后，用户侧才会从逐合同请求切换到一次批量请求。
 
 ### [pending] 2026-08-19 — fix: 补齐 CR 系列申报规则
 

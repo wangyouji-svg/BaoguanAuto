@@ -18,14 +18,15 @@
  *   同一合同号码下，若某行“商品编号”为空且“商品名称”为“国际运费”，
  *   后端会把该行“单价+币别”写入报关单运费栏（K12，合并单元格主单元格）。
  *
- * 原理：脚本把订单数据发到后端 `generate?cache=1` 写入 SQLite 临时缓存，再把短 token 写入下载链接。
+ * 原理：脚本把全部订单一次发到后端批量写入 SQLite 临时缓存，再把短 token 写入下载链接。
  * 用户点击超链接时，服务器按 token 取回缓存数据并实时生成 Excel 下载。
  */
 
 (function () {
     var DATA_SHEET_NAME = '报关数据';
     var RESULT_SHEET_NAME = '报关资料';
-    var SCRIPT_VERSION = 'cache-v2';
+    var SCRIPT_VERSION = 'batch-cache-v1';
+    var BATCH_CACHE_ENDPOINT = 'https://pkcellsolution.com/baoguan/generate?cache=1&batch=1';
     var CACHE_ENDPOINTS = [
         'https://pkcellsolution.com/baoguan/generate?cache=1'
     ];
@@ -272,7 +273,9 @@
             .replace(/=/g, '');
     }
 
-    // ---- 按合同号码逐个处理 ----
+    var pendingJobs = [];
+
+    // ---- 按合同号码收集数据，最后一次性提交 ----
     for (var oi = 0; oi < orderEntries.length; oi++) {
         var entry = orderEntries[oi];
         var targetOrderId = entry.contractNo;
@@ -379,45 +382,108 @@
         }
         var finalRemark = remarks.join('；');
 
-        var dataStr = JSON.stringify({ rows: matchedRows, meta: { traceId: traceId, scriptVersion: SCRIPT_VERSION } });
-        try {
-            var cacheResp = null;
-            var lastCacheError = '';
-            for (var ei = 0; ei < CACHE_ENDPOINTS.length; ei++) {
-                try {
-                    cacheResp = postJsonSync(CACHE_ENDPOINTS[ei], {
-                        rows: matchedRows,
-                        meta: { traceId: traceId, scriptVersion: SCRIPT_VERSION, cacheOnly: true }
-                    }, traceId);
-                    break;
-                } catch (innerErr) {
-                    lastCacheError = String(innerErr && innerErr.message ? innerErr.message : innerErr);
-                }
-            }
-            if (!cacheResp) {
-                throw new Error(lastCacheError || '缓存接口请求失败');
-            }
-            var shortUrl = cacheResp && cacheResp.url ? String(cacheResp.url) : '';
-            if (shortUrl && shortUrl.indexOf('trace_id=') < 0) {
-                shortUrl += (shortUrl.indexOf('?') >= 0 ? '&' : '?')
-                    + 'trace_id=' + encodeURIComponent(traceId);
-            }
-            if (!shortUrl) {
-                var token = cacheResp && cacheResp.token ? String(cacheResp.token) : '';
-                if (!token) {
-                    throw new Error('缓存接口未返回 token');
-                }
-                shortUrl = 'https://pkcellsolution.com/baoguan/generate?t=' + encodeURIComponent(token)
-                    + '&trace_id=' + encodeURIComponent(traceId);
-            }
-            writeResult(targetRowIdx, shortUrl, '链接已生成', '', finalRemark, traceId);
-        } catch (cacheErr) {
-            var legacyUrl = buildLegacyUrl(dataStr, traceId);
-            if (legacyUrl.length <= 18000) {
-                writeResult(targetRowIdx, legacyUrl, '链接已生成', '', finalRemark, traceId);
-            } else {
-                writeResult(targetRowIdx, '', '缓存失败', String(cacheErr && cacheErr.message ? cacheErr.message : cacheErr), finalRemark, traceId);
+        pendingJobs.push({
+            rowIdx: targetRowIdx,
+            rows: matchedRows,
+            traceId: traceId,
+            remark: finalRemark,
+            dataStr: JSON.stringify({ rows: matchedRows, meta: { traceId: traceId, scriptVersion: SCRIPT_VERSION } })
+        });
+    }
+
+    function cacheResponseUrl(cacheResp, traceId) {
+        var shortUrl = cacheResp && cacheResp.url ? String(cacheResp.url) : '';
+        if (shortUrl && shortUrl.indexOf('trace_id=') < 0) {
+            shortUrl += (shortUrl.indexOf('?') >= 0 ? '&' : '?')
+                + 'trace_id=' + encodeURIComponent(traceId);
+        }
+        if (shortUrl) {
+            return shortUrl;
+        }
+        var token = cacheResp && cacheResp.token ? String(cacheResp.token) : '';
+        if (!token) {
+            throw new Error('缓存接口未返回 token');
+        }
+        return 'https://pkcellsolution.com/baoguan/generate?t=' + encodeURIComponent(token)
+            + '&trace_id=' + encodeURIComponent(traceId);
+    }
+
+    function writeCacheSuccess(job, cacheResp) {
+        writeResult(
+            job.rowIdx,
+            cacheResponseUrl(cacheResp, job.traceId),
+            '链接已生成',
+            '',
+            job.remark,
+            job.traceId
+        );
+    }
+
+    function cacheOneWithFallback(job) {
+        var cacheResp = null;
+        var lastCacheError = '';
+        for (var ei = 0; ei < CACHE_ENDPOINTS.length; ei++) {
+            try {
+                cacheResp = postJsonSync(CACHE_ENDPOINTS[ei], {
+                    rows: job.rows,
+                    meta: { traceId: job.traceId, scriptVersion: SCRIPT_VERSION, cacheOnly: true }
+                }, job.traceId);
+                break;
+            } catch (innerErr) {
+                lastCacheError = String(innerErr && innerErr.message ? innerErr.message : innerErr);
             }
         }
+        if (cacheResp) {
+            writeCacheSuccess(job, cacheResp);
+            return;
+        }
+
+        var legacyUrl = buildLegacyUrl(job.dataStr, job.traceId);
+        if (legacyUrl.length <= 18000) {
+            writeResult(job.rowIdx, legacyUrl, '链接已生成', '', job.remark, job.traceId);
+            return;
+        }
+        writeResult(job.rowIdx, '', '缓存失败', lastCacheError || '缓存接口请求失败', job.remark, job.traceId);
+    }
+
+    if (pendingJobs.length === 0) {
+        return;
+    }
+
+    var batchItems = [];
+    for (var pi = 0; pi < pendingJobs.length; pi++) {
+        var pendingJob = pendingJobs[pi];
+        batchItems.push({
+            rows: pendingJob.rows,
+            meta: { traceId: pendingJob.traceId, scriptVersion: SCRIPT_VERSION }
+        });
+    }
+
+    var fallbackJobs = [];
+    var batchTraceId = makeTraceId('BATCH');
+    try {
+        var batchResp = postJsonSync(BATCH_CACHE_ENDPOINT, {
+            items: batchItems,
+            meta: { traceId: batchTraceId, scriptVersion: SCRIPT_VERSION }
+        }, batchTraceId);
+        var batchResults = batchResp && batchResp.items;
+        if (!batchResults || batchResults.length !== pendingJobs.length) {
+            throw new Error('批量缓存接口返回数量不一致');
+        }
+        for (var ri = 0; ri < pendingJobs.length; ri++) {
+            var result = batchResults[ri] || {};
+            if (result.ok) {
+                writeCacheSuccess(pendingJobs[ri], result);
+            } else {
+                fallbackJobs.push(pendingJobs[ri]);
+            }
+        }
+    } catch (batchErr) {
+        fallbackJobs = pendingJobs;
+    }
+
+    // 批量接口未部署或单条数据校验失败时，沿用原有接口，保证现有流程可继续运行。
+    for (var fi = 0; fi < fallbackJobs.length; fi++) {
+        cacheOneWithFallback(fallbackJobs[fi]);
     }
 })();
