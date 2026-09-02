@@ -56,6 +56,21 @@ def main():
     assert button_parts[3] == "纽扣形", button_parts
     assert mod._normalize_domestic_origin("常州其他 32049") == "常州其他 32049"
 
+    lithium_ion_parts = mod.build_product_name(
+        {
+            "商品编号": "8507600099",
+            "品牌": "PKCELL",
+            "规格型号": "PKCELL-LP401230-105-3.7V-PT",
+            "数量": "7000",
+            "净重": "39.2",
+        },
+        pack_qty="7000",
+        pack_net="39.2",
+    ).split("|")
+    assert lithium_ion_parts[4] == "锂离子", lithium_ion_parts
+    assert lithium_ion_parts[6:10] == ["LP401230", "105mAh", "不含汞", "3.7V"], lithium_ion_parts
+    assert lithium_ion_parts[10] == "比能量：69.38WH/KG", lithium_ion_parts
+
     tmpdir = tempfile.mkdtemp(prefix="baoguan-regression-")
     generated_dir = os.path.join(tmpdir, "generated")
     os.makedirs(generated_dir, exist_ok=True)
@@ -87,7 +102,7 @@ def main():
             "贸易国": "美国",
             "运抵国": "美国",
             "成交方式": "FOB",
-            "商品编号": "8507600090",
+            "商品编号": "8507600099",
             "品牌": "PKCELL",
             "规格型号": "IFR14500-800-3.2V",
             "数量": "10",

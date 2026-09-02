@@ -17,7 +17,7 @@ for (let index = 0; index < contractCount; index += 1) {
     contracts.push(contractNo);
     dataRows.push([
         contractNo, 'Receiver', '美国', '美国', 'FOB',
-        '8507600090', '锂离子电池', 'PKCELL', 'IFR14500-800-3.2V',
+        '8507600099', '锂离子电池', 'PKCELL', 'IFR14500-800-3.2V',
         '10', 'PCS', '1.23', '12.30', 'USD', '深圳',
         '1', '2.0', '1.8', `SHIP-${index + 1}`
     ]);

@@ -251,7 +251,7 @@
             if (isEmptyValue(row['数量'])) {
                 missing.push('数量');
             }
-            if (hsCode === '8507600090' || hsCode === '8506500011') {
+            if (hsCode === '8507600099' || hsCode === '8506500011') {
                 var netValue = firstNonEmptyField(row, FIELD_ALIASES['净重']);
                 if (isEmptyValue(netValue)) {
                     missing.push('净重');
