@@ -627,6 +627,11 @@ def _parse_spec(spec: str) -> dict:
             result['capacity_value'] = float(m.group(1))
             result['capacity_unit'] = 'mah'
 
+    # HPC1520 归一后的容量是强制业务值，不允许规格中的普通容量片段覆盖。
+    if model == 'HPC152':
+        result['capacity_value'] = 90.0
+        result['capacity_unit'] = 'mah'
+
     # 固定电压规则优先于规格中的普通电压片段（CR=3.0V，HPC152=4.0V）。
     if model in fixed_voltage:
         result['voltage_v'] = fixed_voltage[model]

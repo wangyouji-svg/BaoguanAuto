@@ -45,6 +45,16 @@ def main():
         parsed = mod._parse_spec(spec)
         assert parsed["capacity_mah"] == expected_capacity, parsed
 
+    for spec in (
+        "PKCELL-HPC1520-带焊片",
+        "PKCELL-ER34615-19000-3.6V+HPC1520-T",
+        "PKCELL-HPC1520-120mAh-3.6V",
+    ):
+        parsed = mod._parse_spec(spec)
+        assert parsed["model"] == "HPC152", parsed
+        assert parsed["capacity_mah"] == 90.0, parsed
+        assert parsed["voltage_v"] == 4.0, parsed
+
     base_row = {
         "商品编号": "8506500090",
         "品牌": "PKCELL",
